@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prompt Battle — Gallery</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <div>
+          <h1>Prompt Battle</h1>
+          <div id="me" class="muted">Loading…</div>
+        </div>
+
+        <div class="actions">
+          <a id="loginBtn" class="btn" href="/api/auth/twitter">Login with Twitter</a>
+          <button id="logoutBtn" class="btn" style="display:none">Logout</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <h2>Featured</h2>
+          <button id="refreshBtn" class="btn">Refresh</button>
+        </div>
+
+        <div id="list" class="grid"></div>
+        <div id="empty" class="muted" style="display:none; margin-top:12px">
+          No featured works yet. Promote a winner first.
+        </div>
+      </section>
+    </div>
+
+    <!-- ВОТ ЭТО ДОБАВЛЯЕМ -->
+    <script src="/gallery.js?v=1"></script>
+
+<script src="/auth-ui.js"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    window.pbInitTwitterUI()
+  })
+</script>
+
+<div id="status"></div>
+<img id="img1" style="max-width: 512px; display:block; margin:12px 0;" />
+<img id="img2" style="max-width: 512px; display:block; margin:12px 0;" />
+
+  </body>
+</html>

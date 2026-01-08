@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Battle — Админ</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #050711;
+      color: #f9fafb;
+      margin: 0;
+      padding: 24px;
+      display: flex;
+      gap: 18px;
+      box-sizing: border-box;
+    }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    .badge {
+      display: inline-block; padding: 3px 8px; border-radius: 999px;
+      font-size: 11px; background: #111827; color: #9ca3af; margin-left: 8px;
+    }
+    .column { flex: 1 1 0; min-width: 340px; }
+    .card {
+      background: #0b1020; border-radius: 14px; border: 1px solid #1f2937;
+      padding: 14px 16px 16px; box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+      margin-bottom: 14px;
+    }
+    label { display:block; margin-bottom:4px; font-size:12px; color:#9ca3af; }
+    input[type="text"], select {
+      width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
+      border: 1px solid #374151; background: #020617; color: #e5e7eb;
+      font-size: 13px; margin-bottom: 8px; outline: none;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: #6366f1; box-shadow: 0 0 0 1px rgba(99,102,241,0.45);
+    }
+    button, a.btn {
+      padding: 7px 12px; border-radius: 999px; border: none; cursor: pointer;
+      background: linear-gradient(135deg, #6366f1, #ec4899);
+      color: #fff; font-size: 13px; font-weight: 500; margin-right: 6px; margin-top: 4px;
+      text-decoration: none; display:inline-block;
+    }
+    button.secondary { background:#111827; }
+    button:disabled { opacity:0.6; cursor:default; }
+    .small { font-size:12px; color:#6b7280; }
+    .status {
+      margin-top:10px; padding: 8px 9px; border-radius:10px; background:#020617;
+      border:1px solid #111827; font-size:12px; white-space:pre-wrap; word-break: break-word;
+    }
+    .status-ok { color:#bbf7d0; }
+    .status-error { color:#fecaca; }
+
+    .battle-list {
+      max-height: calc(100vh - 190px);
+      overflow-y: auto;
+      margin-top: 8px;
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+      background: #020617;
+    }
+    .battle-row {
+      padding: 8px 9px;
+      font-size: 12px;
+      border-bottom: 1px solid #111827;
+      cursor: pointer;
+    }
+    .battle-row:hover { background:#111827; }
+    .battle-row.active { background:#1d2436; }
+    .pill {
+      border-radius: 999px; padding: 1px 6px; font-size: 11px; margin-left: 6px;
+      background: #111827; color: #9ca3af;
+    }
+    .detail-title { font-size:14px; font-weight:600; margin-bottom:4px; }
+    .block { margin-top: 10px; padding-top: 8px; border-top: 1px solid #111827; }
+    .prompt-item { font-size:12px; margin-bottom:6px; }
+    .prompt-item b { color:#e5e7eb; }
+    .nft-grid { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+    .nft-card { width:120px; font-size:11px; color:#d1d5db; }
+    .nft-card img { width:100%; border-radius:8px; border:1px solid #374151; margin-bottom:4px; }
+    .winner-box { margin-top:6px; font-size:12px; }
+    .winner-box label { display:inline-flex; align-items:center; margin-right:10px; cursor:pointer; }
+    .winner-box input { margin-right:6px; }
+  </style>
+</head>
+<body>
+  <div class="column">
+    <div class="card">
+      <h1>Prompt Battle — Админ <span class="badge">битвы</span></h1>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin:8px 0 10px;">
+  <div id="me" class="small">Loading…</div>
+  <div style="display:flex; gap:8px;">
+    <a id="loginBtn" class="btn" href="/api/auth/twitter">Login with Twitter</a>
+    <button id="logoutBtn" class="btn" style="display:none;">Logout</button>
+  </div>
+</div>
+
+
+      <label>ADMIN_TOKEN</label>
+      <input id="adminToken" type="text" placeholder="dev-admin-token-change-me" />
+
+      <div style="margin-top:6px;">
+        <a class="btn" href="/gallery.html">Открыть галерею</a>
+        <button id="refreshBtn">Обновить список битв</button>
+      </div>
+
+      <div class="small" style="margin-top:6px;">
+        Клик по строке — справа откроются детали
+      </div>
+
+      <label for="filterStatus" style="margin-top:10px;">Фильтр по статусу</label>
+      <select id="filterStatus">
+        <option value="">Все</option>
+        <option value="waiting_prompts">waiting_prompts</option>
+        <option value="waiting_judgement">waiting_judgement</option>
+        <option value="finished">finished</option>
+      </select>
+
+      <div class="battle-list" id="battlesList"></div>
+      <div class="status" id="leftStatus">Готов</div>
+    </div>
+  </div>
+
+  <div class="column">
+    <div class="card">
+      <div class="detail-title" id="detailTitle">Битва не выбрана</div>
+      <div class="small" id="detailMeta"></div>
+
+      <div class="block">
+        <div class="small"><b>Промпты</b></div>
+        <div id="promptsBox" class="small">—</div>
+      </div>
+
+      <div class="block">
+        <div class="small"><b>Картинки (NFT заглушка)</b></div>
+        <button class="secondary" id="genBtn">Сгенерировать (generate-debug)</button>
+        <div class="nft-grid" id="nftGrid"></div>
+      </div>
+
+      <div class="block">
+        <div class="small"><b>Победитель</b></div>
+        <div class="winner-box" id="winnerBox">—</div>
+
+        <button id="saveWinnerBtn">Сохранить победителя</button>
+        <button id="closeBtn">Закрыть битву (winner + featured + nft)</button>
+        <button id="closeBtn">Закрыть битву (winner + featured + nft)</button>
+        <button class="secondary" id="promoteBtn">Отправить в зал славы</button>
+      </div>
+
+      <div class="status" id="adminStatus">Нет сообщений</div>
+    </div>
+  </div>
+
+<script>
+  let battles = []
+  let currentBattleId = null
+
+  function setStatus(id, text, isError = false) {
+    const el = document.getElementById(id)
+    el.textContent = text
+    el.classList.remove('status-ok', 'status-error')
+    el.classList.add(isError ? 'status-error' : 'status-ok')
+  }
+
+  function short(addr) {
+    if (!addr) return '—'
+    return addr.slice(0, 6) + '...' + addr.slice(-4)
+  }
+
+  function adminHeaders(extra = {}) {
+    const t = (document.getElementById('adminToken')?.value || '').trim()
+    return t ? { ...extra, 'x-admin-token': t } : extra
+  }
+
+  async function apiGet(url) {
+    const res = await fetch(url, { headers: adminHeaders(), credentials: 'include' })
+    return res.json()
+  }
+
+  async function apiPost(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(body || {}),
+    })
+    return res.json()
+  }
+
+  function renderBattles() {
+    const box = document.getElementById('battlesList')
+    box.innerHTML = ''
+    for (const b of battles) {
+      const div = document.createElement('div')
+      div.className = 'battle-row' + (currentBattleId === b.id ? ' active' : '')
+      div.innerHTML =
+        `<b>#${b.id}</b><span class="pill">${b.status}</span><br/>` +
+        `${short(b.player1)} vs ${short(b.player2)}` +
+        (b.winner ? `<br/><span class="small">winner: ${short(b.winner)}</span>` : '')
+      div.onclick = () => selectBattle(b.id)
+      box.appendChild(div)
+    }
+  }
+
+  async function loadBattles() {
+    const status = (document.getElementById('filterStatus').value || '').trim()
+    let url = '/api/battles?limit=50'
+    if (status) url += '&status=' + encodeURIComponent(status)
+
+    setStatus('leftStatus', 'Загружаем битвы...')
+    const data = await apiGet(url)
+
+    if (!data.ok) {
+      setStatus('leftStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+      return
+    }
+
+    battles = data.items || []
+    renderBattles()
+    setStatus('leftStatus', 'Битв: ' + battles.length)
+  }
+
+  async function selectBattle(id) {
+    currentBattleId = id
+    renderBattles()
+    await loadBattleDetails(id)
+  }
+
+  function renderBattleDetails(data) {
+    const b = data.battle
+    document.getElementById('detailTitle').textContent = `Битва #${b.id} — ${b.status} — ставка ${b.stake}`
+    document.getElementById('detailMeta').textContent =
+      `Игрок 1: ${b.player1} | Игрок 2: ${b.player2}` + (b.winner ? ` | Победитель: ${b.winner}` : '')
+
+    // prompts
+    const promptsBox = document.getElementById('promptsBox')
+    promptsBox.innerHTML = ''
+    if (!data.prompts || !data.prompts.length) {
+      promptsBox.textContent = 'Промптов пока нет'
+    } else {
+      data.prompts.forEach(p => {
+        const div = document.createElement('div')
+        div.className = 'prompt-item'
+        const t = p.prompt || ''
+        div.innerHTML = `<b>${short(p.player_address)}:</b> ${t.length > 220 ? t.slice(0, 220) + '…' : t}`
+        promptsBox.appendChild(div)
+      })
+    }
+
+    // nfts
+    const grid = document.getElementById('nftGrid')
+    grid.innerHTML = ''
+    if (data.nfts && data.nfts.length) {
+      data.nfts.forEach(n => {
+        const card = document.createElement('div')
+        card.className = 'nft-card'
+        if (n.image_url) {
+          const img = document.createElement('img')
+          img.src = n.image_url
+          img.alt = n.player_address
+          card.appendChild(img)
+        }
+        const meta = document.createElement('div')
+        meta.textContent = short(n.player_address)
+        card.appendChild(meta)
+        grid.appendChild(card)
+      })
+    }
+
+    // winner radios
+    const wb = document.getElementById('winnerBox')
+    wb.innerHTML = ''
+    const r1 = document.createElement('label')
+    r1.innerHTML = `<input type="radio" name="winner" value="${b.player1}"> ${short(b.player1)}`
+    const r2 = document.createElement('label')
+    r2.innerHTML = `<input type="radio" name="winner" value="${b.player2}"> ${short(b.player2)}`
+    wb.appendChild(r1)
+    wb.appendChild(r2)
+
+    if (b.winner === b.player1) r1.querySelector('input').checked = true
+    if (b.winner === b.player2) r2.querySelector('input').checked = true
+  }
+
+  async function loadBattleDetails(id) {
+    setStatus('adminStatus', 'Загружаем детали битвы #' + id + '...')
+    const data = await apiGet('/api/battles/' + id + '/full')
+    const deps = await apiGet('/api/battles/' + id + '/deposits')
+
+
+    if (!data.ok) {
+      setStatus('adminStatus', 'Ошибка деталей: ' + (data.error || 'unknown'), true)
+      return
+    }
+
+    renderBattleDetails(data)
+    setStatus('adminStatus', 'Ок')
+  }
+
+  function getSelectedWinner() {
+    const radios = document.querySelectorAll('input[name="winner"]')
+    for (const r of radios) if (r.checked) return r.value
+    return null
+  }
+
+  async function saveWinner() {
+    if (!currentBattleId) return setStatus('adminStatus', 'Сначала выбери битву', true)
+
+    const winner = getSelectedWinner()
+    if (!winner) return setStatus('adminStatus', 'Нужно выбрать победителя', true)
+
+    setStatus('adminStatus', 'Сохраняем победителя...')
+    const data = await apiPost('/api/battles/' + currentBattleId + '/set-winner', { winner })
+
+    if (!data.ok) return setStatus('adminStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+
+    setStatus('adminStatus', 'Победитель сохранён')
+    await loadBattles()
+    await loadBattleDetails(currentBattleId)
+  }
+
+  async function promoteWinner() {
+    if (!currentBattleId) return setStatus('adminStatus', 'Сначала выбери битву', true)
+
+    setStatus('adminStatus', 'Отправляем в зал славы...')
+    const data = await apiPost('/api/battles/' + currentBattleId + '/promote-winner', {})
+
+    if (!data.ok) return setStatus('adminStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+
+    setStatus('adminStatus', 'Ок. featuredId=' + (data.featured?.id ?? '—'))
+  }
+
+  async function generateImagesForCurrent() {
+    if (!currentBattleId) return setStatus('adminStatus', 'Сначала выбери битву', true)
+
+    setStatus('adminStatus', 'Генерируем картинки...')
+    const data = await apiGet('/api/battles/' + currentBattleId + '/generate-debug')
+
+    if (!data.ok) return setStatus('adminStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+
+    setStatus('adminStatus', 'Сгенерировано: ' + data.count)
+    await loadBattleDetails(currentBattleId)
+  }
+
+  async function closeBattle() {
+  if (!currentBattleId) return setStatus('adminStatus', 'Сначала выбери битву', true)
+
+  const winner = getSelectedWinner()
+  if (!winner) return setStatus('adminStatus', 'Нужно выбрать победителя', true)
+
+  setStatus('adminStatus', 'Закрываем битву: winner + featured + nft...')
+  const data = await apiPost('/api/battles/' + currentBattleId + '/close', { winner })
+
+  if (!data.ok) return setStatus('adminStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+
+  setStatus(
+    'adminStatus',
+    'Готово: featuredId=' + (data.featured?.id ?? '—') + ', createdNfts=' + (data.createdNfts ?? 0)
+  )
+
+  await loadBattles()
+  await loadBattleDetails(currentBattleId)
+}
+
+
+  async function closeBattle() {
+    if (!currentBattleId) return setStatus('adminStatus', 'Сначала выбери битву', true)
+
+    const winner = getSelectedWinner()
+    if (!winner) return setStatus('adminStatus', 'Нужно выбрать победителя', true)
+
+    setStatus('adminStatus', 'Закрываем битву: winner + featured + nft...')
+    const data = await apiPost('/api/battles/' + currentBattleId + '/close', { winner })
+
+    if (!data.ok) return setStatus('adminStatus', 'Ошибка: ' + (data.error || 'unknown'), true)
+
+    setStatus(
+      'adminStatus',
+      'Готово: featuredId=' + (data.featured?.id ?? '—') + ', createdNfts=' + (data.createdNfts ?? 0)
+    )
+
+    await loadBattles()
+    await loadBattleDetails(currentBattleId)
+  }
+
+  // init
+  window.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem('PB_ADMIN_TOKEN')
+    if (saved) document.getElementById('adminToken').value = saved
+
+    document.getElementById('adminToken').addEventListener('input', (e) => {
+      localStorage.setItem('PB_ADMIN_TOKEN', e.target.value || '')
+    })
+
+    document.getElementById('refreshBtn').addEventListener('click', loadBattles)
+    document.getElementById('filterStatus').addEventListener('change', loadBattles)
+
+    document.getElementById('saveWinnerBtn').addEventListener('click', saveWinner)
+    document.getElementById('promoteBtn').addEventListener('click', promoteWinner)
+    document.getElementById('genBtn').addEventListener('click', generateImagesForCurrent)
+    document.getElementById('closeBtn').addEventListener('click', closeBattle)
+
+    document.getElementById('closeBtn').addEventListener('click', closeBattle)
+
+    loadBattles()
+  })
+</script>
+
+<script src="/auth-ui.js"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    window.pbInitTwitterUI()
+  })
+</script>
+
+
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Battle — Battle</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <h1>Prompt Battle</h1>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin:8px 0 10px;">
+          <div>
+            <div id="me" class="muted">Loading…</div>
+            <div class="muted" style="font-size:12px;">Twitter нужен для голосования и участия</div>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <a id="loginBtn" class="btn" href="#">Login with Twitter</a>
+            <button id="logoutBtn" class="btn" style="display:none;">Logout</button>
+          </div>
+        </div>
+
+        <div id="battleTitle" class="muted">Battle: —</div>
+        <div id="net" class="muted">Network: —</div>
+        <div id="addr" class="muted">Wallet: not connected</div>
+        <div id="usdc" class="muted">USDC: —</div>
+      </div>
+
+      <div class="actions">
+        <button id="connectBtn" class="btn">Connect wallet</button>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="panelHeader">
+        <h2>Status</h2>
+      </div>
+
+      <div id="stateBox" class="muted">Loading…</div>
+      <div id="status" class="muted" style="margin-top:10px;">Ready</div>
+    </section>
+
+    <section class="panel" style="margin-top:14px;">
+      <div class="panelHeader">
+        <h2>Actions</h2>
+      </div>
+
+      <label class="muted" style="display:block; margin-top:10px;">Stake (USDC)</label>
+      <select id="stakeSel" class="input">
+        <option value="1">1</option>
+        <option value="5">5</option>
+        <option value="10">10</option>
+      </select>
+
+      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="approveBtn" class="btn">Approve USDC</button>
+        <button id="depositBtn" class="btn">Deposit</button>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label class="muted">Submit your result (image URL)</label>
+        <input id="imageUrl" class="input" placeholder="https://..." />
+        <button id="submitWorkBtn" class="btn" style="margin-top:10px;">Submit work</button>
+      </div>
+
+      <div style="margin-top:14px;">
+        <a class="btn" href="/gallery.html">Gallery</a>
+        <a class="btn" href="/admin.html" style="margin-left:8px;">Admin</a>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+  <script src="/auth-ui.js"></script>
+  <script src="/battle.js"></script>
+</body>
+</html>
