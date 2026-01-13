@@ -10,6 +10,11 @@ const TwitterStrategy = require('passport-twitter').Strategy
 const { Pool } = require('pg')
 const path = require('path')
 const { ethers } = require('ethers')
+const fs = require('fs/promises')
+
+const OpenAIImport = require('openai')
+const OpenAI = OpenAIImport.default || OpenAIImport
+
 
 // === Arc testnet config (manual) ===
 
@@ -142,75 +147,155 @@ const pool = new Pool({
 // ==============================
 // Generation runner (autostart)
 // ==============================
-const genLocks = new Set();
+
+// ==============================
+// Generation runner (autostart)
+// ==============================
+
+const genLocks = new Set()
+
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null
+
+if (!openai) {
+  console.warn('OPENAI_API_KEY is missing, image generation will fail')
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = 90000) {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal })
+    return res
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+
+async function generateAndSavePng({ prompt, outPath }) {
+  const model = (process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5').trim()
+  const size = (process.env.OPENAI_IMAGE_SIZE || '1024x1024').trim()
+  const quality = (process.env.OPENAI_IMAGE_QUALITY || 'high').trim()
+  const output_format = (process.env.OPENAI_IMAGE_FORMAT || 'png').trim()
+
+  await fs.mkdir(path.dirname(outPath), { recursive: true })
+
+  const resp = await fetchWithTimeout('https://api.openai.com/v1/images/generations', {
+
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      prompt,
+      n: 1,
+      size,
+      quality,
+      output_format,
+      // ВАЖНО: НЕ отправляем response_format для gpt-image-*
+    }),
+  })
+
+  const text = await resp.text()
+  let json = null
+  try { json = JSON.parse(text) } catch {}
+
+  if (!resp.ok) {
+    const details = json ? JSON.stringify(json) : text.slice(0, 500)
+    throw new Error(`OpenAI Images API error ${resp.status}: ${details}`)
+  }
+
+  const b64 = json?.data?.[0]?.b64_json
+  if (!b64) throw new Error('OpenAI returned no b64_json')
+
+  const buf = Buffer.from(b64, 'base64')
+  await fs.writeFile(outPath, buf)
+}
+
+
+
 
 async function maybeStartGeneration(pool, battleId) {
-  if (genLocks.has(battleId)) return;
+  if (genLocks.has(battleId)) return
 
-  // проверяем состояние в БД
   const { rows } = await pool.query(
-    `SELECT id, p1_prompt, p2_prompt, p1_deposit_tx, p2_deposit_tx, gen_status
-     FROM battles
-     WHERE id=$1`,
+    `SELECT id, player1, player2, gen_status
+       FROM battles
+      WHERE id=$1`,
     [battleId]
-  );
+  )
+  const b = rows[0]
+  if (!b) return
 
-  const b = rows[0];
-  if (!b) return;
+  const status = String(b.gen_status || 'idle').toLowerCase()
+if (status === 'running' || status === 'done') return
 
-  const bothDeposited = Boolean(b.p1_deposit_tx) && Boolean(b.p2_deposit_tx);
-  if (!bothDeposited) return;
+  const dep = await pool.query(
+    `SELECT COUNT(*)::int AS c
+       FROM deposits
+      WHERE battle_id=$1 AND status='confirmed'`,
+    [battleId]
+  )
+  const depCount = dep.rows[0]?.c || 0
+  if (depCount < 2) return
 
-  const status = (b.gen_status || 'idle').toLowerCase();
-  if (status !== 'idle') return;
-
-  // атомарно переводим в running (защита от двойного старта)
   const upd = await pool.query(
     `UPDATE battles
-       SET gen_status='running', gen_started_at=NOW(), gen_error=NULL
-     WHERE id=$1 AND (gen_status IS NULL OR gen_status='idle')
-     RETURNING id`,
+        SET gen_status='running', gen_started_at=NOW(), gen_error=NULL
+      WHERE id=$1 AND (gen_status IS NULL OR gen_status NOT IN ('running','done'))
+      RETURNING id`,
     [battleId]
-  );
-  if (!upd.rowCount) return;
+  )
+  if (!upd.rowCount) return
 
-  genLocks.add(battleId);
+  genLocks.add(battleId)
 
   setImmediate(async () => {
     try {
-      // перечитываем prompts (на случай обновлений)
-      const { rows: rows2 } = await pool.query(
-        `SELECT id, p1_prompt, p2_prompt
-         FROM battles
-         WHERE id=$1`,
+      const pr = await pool.query(
+        `SELECT player_address, prompt
+           FROM prompts
+          WHERE battle_id=$1`,
         [battleId]
-      );
-      const bb = rows2[0];
-      if (!bb) throw new Error('battle not found after start');
+      )
 
-      if (!bb.p1_prompt || !bb.p2_prompt) {
-        throw new Error('Missing p1_prompt/p2_prompt in battles row');
+      const norm = (s) => String(s || '').toLowerCase()
+      const p1Addr = norm(b.player1)
+      const p2Addr = norm(b.player2)
+
+      const map = new Map(pr.rows.map(r => [norm(r.player_address), r.prompt]))
+      const p1Prompt = map.get(p1Addr)
+      const p2Prompt = map.get(p2Addr)
+
+      if (!p1Prompt || !p2Prompt) {
+        throw new Error('Missing prompts in prompts table for one or both players')
       }
 
-      const outDir = path.join(__dirname, 'public', 'generated');
-      const p1File = `battle-${battleId}-p1.png`;
-      const p2File = `battle-${battleId}-p2.png`;
-      const p1Path = path.join(outDir, p1File);
-      const p2Path = path.join(outDir, p2File);
+      const outDir = path.join(__dirname, 'public', 'generated')
+      const p1File = `battle-${battleId}-p1.png`
+      const p2File = `battle-${battleId}-p2.png`
 
-      await generateAndSavePng({ prompt: bb.p1_prompt, outPath: p1Path });
-      await generateAndSavePng({ prompt: bb.p2_prompt, outPath: p2Path });
+      await generateAndSavePng({ prompt: p1Prompt, outPath: path.join(outDir, p1File) })
+      await generateAndSavePng({ prompt: p2Prompt, outPath: path.join(outDir, p2File) })
 
-      await pool.query(
-        `UPDATE battles
-            SET gen_status='done',
-                p1_image_url=$2,
-                p2_image_url=$3,
-                gen_finished_at=NOW(),
-                gen_error=NULL
-          WHERE id=$1`,
-        [battleId, `/generated/${p1File}`, `/generated/${p2File}`]
-      );
+await pool.query(
+  `UPDATE battles
+      SET gen_status='done',
+          p1_image_url=$2,
+          p2_image_url=$3,
+          img1_url=$2,
+          img2_url=$3,
+          gen_finished_at=NOW(),
+          gen_error=NULL
+    WHERE id=$1`,
+  [battleId, `/generated/${p1File}`, `/generated/${p2File}`]
+)
+
     } catch (e) {
       await pool.query(
         `UPDATE battles
@@ -218,13 +303,13 @@ async function maybeStartGeneration(pool, battleId) {
                 gen_error=$2
           WHERE id=$1`,
         [battleId, String(e?.message || e)]
-      );
+      )
     } finally {
-      genLocks.delete(battleId);
-      genLocks.delete(battleId);
+      genLocks.delete(battleId)
     }
-  });
+  })
 }
+
 
 
 // ======================================================
@@ -345,6 +430,45 @@ function toInt(value, fallback) {
 // ======================================================
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
+
+app.get('/api/battles/:id/status', async (req, res) => {
+  const battleId = Number(req.params.id)
+
+  try {
+    // автозапуск генерации, если условия уже выполнены
+    await maybeStartGeneration(pool, battleId)
+  } catch (e) {
+    console.error('maybeStartGeneration (status) failed', e)
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT gen_status, gen_error, p1_image_url, p2_image_url
+         FROM battles
+        WHERE id=$1`,
+      [battleId]
+    )
+
+    const b = rows[0]
+    if (!b) return res.json({ ok: false, error: 'battle not found' })
+
+    const s = String(b.gen_status || 'idle').toLowerCase()
+    const normalized =
+      (s === 'idle' || s === 'running' || s === 'done' || s === 'error') ? s : 'idle'
+
+    return res.json({
+      ok: true,
+      genStatus: normalized,
+      error: b.gen_error || null,
+      p1Image: b.p1_image_url || null,
+      p2Image: b.p2_image_url || null,
+    })
+  } catch (e) {
+    return res.json({ ok: false, error: e?.message || String(e) })
+  }
+})
+
+
 
 app.get('/api/test-db', async (req, res) => {
   try {
@@ -529,6 +653,10 @@ app.get('/api/match', async (req, res) => {
 
 // POST /api/battles/:id/confirm-deposit
 // body: { address, txHash }
+// POST /api/battles/:id/confirm-deposit
+// body: { address, txHash }
+// POST /api/battles/:id/confirm-deposit
+// body: { address, txHash }
 app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
   const user = requireTwitterUser(req, res)
   if (!user) return
@@ -538,7 +666,7 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
   const txHash = String(req.body.txHash || '').trim()
 
   if (!battleId || !address || !txHash) {
-    return res.status(400).json({ ok:false, error:'battleId, address, txHash are required' })
+    return res.status(400).json({ ok: false, error: 'battleId, address, txHash are required' })
   }
 
   const rpc = (process.env.ARC_RPC_URL || '').trim()
@@ -546,41 +674,42 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
   const usdcAddr = (process.env.USDC_ADDRESS || '').trim()
 
   if (!rpc || !escrowAddr || !usdcAddr) {
-    return res.status(500).json({ ok:false, error:'ARC_RPC_URL / ESCROW_ADDRESS / USDC_ADDRESS missing' })
+    return res.status(500).json({ ok: false, error: 'ARC_RPC_URL / ESCROW_ADDRESS / USDC_ADDRESS missing' })
   }
 
   try {
     const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [battleId])
-    if (!bRes.rows.length) return res.status(404).json({ ok:false, error:'battle not found' })
+    if (!bRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
     const b = bRes.rows[0]
 
     const a = address.toLowerCase()
-    if (a !== (b.player1||'').toLowerCase() && a !== (b.player2||'').toLowerCase()) {
-      return res.status(403).json({ ok:false, error:'address is not a player of this battle' })
+    if (a !== (b.player1 || '').toLowerCase() && a !== (b.player2 || '').toLowerCase()) {
+      return res.status(403).json({ ok: false, error: 'address is not a player of this battle' })
     }
 
-    // Идемпотентность
+    // идемпотентность
     const already = await pool.query(
       `SELECT * FROM deposits WHERE battle_id=$1 AND player_address=$2 LIMIT 1`,
       [battleId, address]
     )
     if (already.rows.length) {
-      return res.json({ ok:true, already:true, deposit: already.rows[0] })
+      return res.json({ ok: true, already: true, deposit: already.rows[0] })
     }
 
     const provider = new ethers.JsonRpcProvider(rpc)
+
     const tx = await provider.getTransaction(txHash)
-    if (!tx) return res.status(404).json({ ok:false, error:'tx not found' })
+    if (!tx) return res.status(404).json({ ok: false, error: 'tx not found' })
 
     const receipt = await provider.getTransactionReceipt(txHash)
-    if (!receipt) return res.status(404).json({ ok:false, error:'receipt not found' })
-    if (receipt.status !== 1) return res.status(400).json({ ok:false, error:'tx reverted' })
+    if (!receipt) return res.status(404).json({ ok: false, error: 'receipt not found' })
+    if (receipt.status !== 1) return res.status(400).json({ ok: false, error: 'tx reverted' })
 
-    if ((tx.from||'').toLowerCase() !== address.toLowerCase()) {
-      return res.status(400).json({ ok:false, error:'tx.from != address' })
+    if ((tx.from || '').toLowerCase() !== address.toLowerCase()) {
+      return res.status(400).json({ ok: false, error: 'tx.from != address' })
     }
-    if ((tx.to||'').toLowerCase() !== escrowAddr.toLowerCase()) {
-      return res.status(400).json({ ok:false, error:'tx.to is not escrow' })
+    if ((tx.to || '').toLowerCase() !== escrowAddr.toLowerCase()) {
+      return res.status(400).json({ ok: false, error: 'tx.to is not escrow' })
     }
 
     // decode call data: deposit(uint256,uint256)
@@ -589,30 +718,29 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
     try {
       decoded = iface.parseTransaction({ data: tx.data })
     } catch (e) {
-      return res.status(400).json({ ok:false, error:'tx is not deposit(battleId,amount)' })
+      return res.status(400).json({ ok: false, error: 'tx is not deposit(battleId,amount)' })
     }
 
     const callBattleId = Number(decoded.args.battleId)
     const callAmount = decoded.args.amount
 
     if (callBattleId !== battleId) {
-      return res.status(400).json({ ok:false, error:'deposit battleId mismatch' })
+      return res.status(400).json({ ok: false, error: 'deposit battleId mismatch' })
     }
 
-    // decimals берём из БД/конфига проще: предполагаем 6 и отдельно валидируем whitelist
     const usdcDecimals = 6
     if (!allowedStakeBaseUnits(callAmount.toString(), usdcDecimals)) {
-      return res.status(400).json({ ok:false, error:'BAD_STAKE base units, allowed 1/5/10 USDC' })
+      return res.status(400).json({ ok: false, error: 'BAD_STAKE base units, allowed 1/5/10 USDC' })
     }
 
-    // Теперь главное: в receipt.logs должен быть Transfer USDC (from -> escrow) на callAmount
+    // receipt.logs должен содержать Transfer USDC (from -> escrow) на callAmount
     const erc20Iface = new ethers.Interface([
-      'event Transfer(address indexed from, address indexed to, uint256 value)'
+      'event Transfer(address indexed from, address indexed to, uint256 value)',
     ])
 
     let found = false
     for (const lg of receipt.logs) {
-      if ((lg.address||'').toLowerCase() !== usdcAddr.toLowerCase()) continue
+      if ((lg.address || '').toLowerCase() !== usdcAddr.toLowerCase()) continue
       try {
         const parsed = erc20Iface.parseLog({ topics: lg.topics, data: lg.data })
         const from = String(parsed.args.from).toLowerCase()
@@ -627,7 +755,7 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
     }
 
     if (!found) {
-      return res.status(400).json({ ok:false, error:'ERC20 Transfer not found in receipt logs' })
+      return res.status(400).json({ ok: false, error: 'ERC20 Transfer not found in receipt logs' })
     }
 
     const net = await provider.getNetwork()
@@ -640,8 +768,11 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
       [battleId, address, callAmount.toString(), txHash, chainId, usdcAddr, escrowAddr]
     )
 
-    // обновим статус битвы
-    const depCountRes = await pool.query(`SELECT COUNT(*) FROM deposits WHERE battle_id=$1`, [battleId])
+    // depCount считаем только confirmed
+    const depCountRes = await pool.query(
+      `SELECT COUNT(*) FROM deposits WHERE battle_id=$1 AND status='confirmed'`,
+      [battleId]
+    )
     const depCount = Number(depCountRes.rows[0].count || 0)
 
     let newStatus = b.status
@@ -653,64 +784,40 @@ app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
       [newStatus, battleId]
     )
 
+    // автозапуск генерации после второго депозита
+    if (depCount >= 2) {
+      maybeStartGeneration(pool, battleId).catch((e) => {
+        console.error('maybeStartGeneration failed', e)
+      })
+    }
+
     await audit('confirm_deposit', battleId, address, { txHash, amount: callAmount.toString(), chainId })
 
-    res.json({ ok:true, battleId, address, amount: callAmount.toString(), txHash, chainId, status: newStatus })
-  } catch (err) {
-    console.error('confirm-deposit error', err)
-    res.status(500).json({ ok:false, error: err.message })
-  }
-})
+// автозапуск генерации, когда оба депозита подтверждены
+if (depCount >= 2) {
+  setImmediate(() => {
+    maybeStartGeneration(pool, battleId).catch(e => {
+      console.error('maybeStartGeneration failed:', e)
+    })
+  })
+}
 
-app.get('/api/battles/:id/status', async (req, res) => {
-  try {
-    const battleId = Number(req.params.id);
-    const { rows } = await pool.query(
-      `SELECT gen_status, gen_error, p1_image_url, p2_image_url
-         FROM battles
-        WHERE id=$1`,
-      [battleId]
-    );
-    const b = rows[0];
-    if (!b) return res.json({ ok: false, error: 'battle not found' });
 
     return res.json({
       ok: true,
-      genStatus: b.gen_status || 'idle',
-      error: b.gen_error || null,
-      p1Image: b.p1_image_url || null,
-      p2Image: b.p2_image_url || null,
-    });
-  } catch (e) {
-    return res.json({ ok: false, error: e?.message || String(e) });
-  }
-});
-
-
-
-// GET /api/battles/:id/deposits (admin)
-app.get('/api/battles/:id/deposits', async (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok: false, error: 'battleId is required' })
-
-  try {
-    const r = await pool.query(
-      `
-      SELECT player_address, amount, tx_hash, chain_id, status, created_at
-      FROM deposits
-      WHERE battle_id = $1
-      ORDER BY created_at ASC
-      `,
-      [battleId]
-    )
-    return res.json({ ok: true, items: r.rows })
+      battleId,
+      address,
+      amount: callAmount.toString(),
+      txHash,
+      chainId,
+      status: newStatus,
+    })
   } catch (err) {
-    console.error('deposits error', err)
+    console.error('confirm-deposit error', err)
     return res.status(500).json({ ok: false, error: err.message })
   }
 })
+
 
 // ======================================================
 // 8) Twitter auth routes

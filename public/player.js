@@ -25,7 +25,12 @@ function setEnabled(el, enabled) {
 
 async function apiGet(url) {
   const res = await fetch(url, { credentials: 'include' })
-  return res.json()
+  const txt = await res.text()
+  try {
+    return JSON.parse(txt)
+  } catch (e) {
+    throw new Error(`API GET ${url} вернул не JSON, HTTP ${res.status}, начало ответа: ` + txt.slice(0, 180))
+  }
 }
 
 async function apiPost(url, body) {
@@ -35,8 +40,15 @@ async function apiPost(url, body) {
     credentials: 'include',
     body: JSON.stringify(body || {}),
   })
-  return res.json()
+
+  const txt = await res.text()
+  try {
+    return JSON.parse(txt)
+  } catch (e) {
+    throw new Error(`API POST ${url} вернул не JSON, HTTP ${res.status}, начало ответа: ` + txt.slice(0, 180))
+  }
 }
+
 
 async function mustBeTwitterAuthed() {
   if (!window.pbAuth) return false

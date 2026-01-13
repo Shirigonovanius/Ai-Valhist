@@ -7,12 +7,15 @@
 
 (function () {
   async function apiGet(url) {
-    const res = await fetch(url, { credentials: 'include' })
+      const API_BASE = 'http://localhost:4000'
+  const apiUrl = (p) => API_BASE.replace(/\/$/, '') + p
+
+    const res = await fetch(apiUrl(url), { credentials: 'include' })
     return res.json()
   }
 
   async function apiPost(url, body) {
-    const res = await fetch(url, {
+    const res = await fetch(apiUrl(url), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',

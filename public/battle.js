@@ -23,13 +23,16 @@ function setEnabled(el, enabled) {
   el.style.opacity = enabled ? '1' : '0.55'
 }
 
+const API_BASE = 'http://localhost:4000'
+const apiUrl = (p) => API_BASE.replace(/\/$/, '') + p
+
 async function apiGet(url) {
-  const res = await fetch(url, { credentials: 'include' })
+  const res = await fetch(apiUrl(url), { credentials: 'include' })
   return res.json()
 }
 
 async function apiPost(url, body) {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -37,6 +40,7 @@ async function apiPost(url, body) {
   })
   return res.json()
 }
+
 
 function qs(name) {
   const u = new URL(window.location.href)
