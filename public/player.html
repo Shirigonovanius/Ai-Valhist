@@ -15,7 +15,7 @@
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin:8px 0 10px;">
           <div>
             <div id="me" class="muted">Loading…</div>
-            <div class="muted" style="font-size:12px;">Без Twitter нельзя подключить кошелёк и играть</div>
+            <div class="muted" style="font-size:12px;">Login with Twitter required</div>
           </div>
 
           <div style="display:flex; gap:8px;">
@@ -23,8 +23,6 @@
             <button id="logoutBtn" class="btn" style="display:none;">Logout</button>
           </div>
         </div>
-
-        <div class="muted">Игрок: сначала Twitter, потом кошелёк, потом ставка и промпт</div>
 
         <div id="net" class="muted">Network: —</div>
         <div id="addr" class="muted">Wallet: not connected</div>
@@ -38,38 +36,36 @@
 
     <section class="panel">
       <div class="panelHeader">
-        <h2>Battle</h2>
+        <h2>Lobby</h2>
       </div>
 
-      <label class="muted" style="display:block; margin-top:10px;">Stake (USDC)</label>
+      <label class="muted" style="display:block; margin-top:10px;">Select Stake (USDC)</label>
       <select id="stakeSel" class="input">
-        <option value="1">1</option>
-        <option value="5">5</option>
-        <option value="10">10</option>
+        <option value="1">1 USDC</option>
+        <option value="5">5 USDC</option>
+        <option value="10">10 USDC</option>
       </select>
 
-      <label class="muted" style="display:block; margin-top:10px;">Prompt</label>
-      <textarea id="prompt" class="input" rows="4" placeholder="Write your prompt..."></textarea>
-
-      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+      <div style="margin-top:20px; display:flex; gap:10px; flex-wrap:wrap;">
         <button id="approveBtn" class="btn">Approve USDC</button>
-        <button id="playBtn" class="btn">Play (matchmaking + deposit)</button>
-        <a class="btn" href="/gallery.html">Gallery</a>
+        <button id="playBtn" class="btn" style="flex:1; font-weight:bold;">Find Match</button>
+      </div>
+      
+      <div style="margin-top:10px; text-align:center;">
+          <a href="/gallery.html" class="muted" style="text-decoration:none;">View Gallery</a>
       </div>
 
-      <div id="status" class="muted" style="margin-top:12px;">Ready</div>
+      <div id="status" class="muted" style="margin-top:12px;">Ready to play</div>
     </section>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
-
-  <!-- ВАЖНО: auth-ui.js должен быть ДО player.js -->
   <script src="/auth-ui.js"></script>
   <script src="/player.js"></script>
 
   <script>
     window.addEventListener('DOMContentLoaded', () => {
-      window.pbInitTwitterUI()
+      if(window.pbInitTwitterUI) window.pbInitTwitterUI()
     })
   </script>
 </body>

@@ -12,6 +12,8 @@ const state = {
 
 let playLocked = false
 
+// --- HELPERS ---
+
 function setStatus(txt) {
   const el = $('status')
   if (el) el.textContent = txt
@@ -26,11 +28,8 @@ function setEnabled(el, enabled) {
 async function apiGet(url) {
   const res = await fetch(url, { credentials: 'include' })
   const txt = await res.text()
-  try {
-    return JSON.parse(txt)
-  } catch (e) {
-    throw new Error(`API GET ${url} вернул не JSON, HTTP ${res.status}, начало ответа: ` + txt.slice(0, 180))
-  }
+  try { return JSON.parse(txt) } 
+  catch (e) { throw new Error(`API Error: ${txt.slice(0, 100)}`) }
 }
 
 async function apiPost(url, body) {
@@ -40,15 +39,12 @@ async function apiPost(url, body) {
     credentials: 'include',
     body: JSON.stringify(body || {}),
   })
-
   const txt = await res.text()
-  try {
-    return JSON.parse(txt)
-  } catch (e) {
-    throw new Error(`API POST ${url} вернул не JSON, HTTP ${res.status}, начало ответа: ` + txt.slice(0, 180))
-  }
+  try { return JSON.parse(txt) } 
+  catch (e) { throw new Error(`API Error: ${txt.slice(0, 100)}`) }
 }
 
+// --- AUTH & CONFIG ---
 
 async function mustBeTwitterAuthed() {
   if (!window.pbAuth) return false
@@ -58,17 +54,8 @@ async function mustBeTwitterAuthed() {
 
 async function loadConfig() {
   const cfg = await apiGet('/api/config')
-  if (!cfg.ok) throw new Error('Cannot load /api/config')
-
+  if (!cfg.ok) throw new Error('Cannot load config')
   state.cfg = cfg
-
-  const usdc = cfg.contracts?.usdc || null
-  const escrow = cfg.contracts?.escrow || null
-
-  if (!usdc || !escrow) {
-    setStatus('Server config missing: set USDC_ADDRESS and ESCROW_ADDRESS in .env')
-  }
-
   return cfg
 }
 
@@ -85,81 +72,43 @@ async function refreshGating() {
 
   if (!authed) {
     $('addr').textContent = 'Wallet: blocked (login with Twitter first)'
-    $('net').textContent = 'Network: —'
-    $('usdc').textContent = 'USDC: —'
-    setStatus('Сначала залогинься через Twitter')
+    setStatus('Login with Twitter first')
     return false
   }
-
-  if (!connected) {
-    setStatus('Twitter ok, теперь подключи кошелёк')
-  } else {
-    setStatus('Wallet connected')
-  }
-
+  
+  $('addr').textContent = connected ? `Wallet: ${state.address}` : 'Wallet: not connected'
   return true
 }
 
-async function getProvider() {
-  if (!window.ethereum) throw new Error('No wallet found (install MetaMask)')
-  return new ethers.BrowserProvider(window.ethereum)
-}
-
-async function ensureCorrectNetwork(provider) {
-  if (!state.cfg?.arc?.chainId) return
-
-  const wantDec = Number(state.cfg.arc.chainId)
-  const wantHex = state.cfg.arc.chainIdHex
-  const net = await provider.getNetwork()
-  const haveDec = Number(net.chainId)
-
-  $('net').textContent = 'Network: chainId=' + haveDec
-
-  if (haveDec === wantDec) return
-
-  try {
-    await window.ethereum.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: wantHex }],
-    })
-  } catch (e) {
-    throw new Error(
-      'Неверная сеть. Переключи кошелёк на Arc testnet (chainId=' +
-        wantDec +
-        ', ' +
-        wantHex +
-        ')'
-    )
-  }
-}
+// --- WALLET CONNECT ---
 
 async function connectWallet() {
-  const authed = await mustBeTwitterAuthed()
-  if (!authed) {
-    setStatus('Сначала Twitter логин')
-    return null
-  }
-
-  const provider = await getProvider()
+  if (!window.ethereum) return alert('Install MetaMask')
+  const provider = new ethers.BrowserProvider(window.ethereum)
   await provider.send('eth_requestAccounts', [])
-
-  await ensureCorrectNetwork(provider)
+  
+  // Проверка сети
+  if (state.cfg?.arc?.chainIdHex) {
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: state.cfg.arc.chainIdHex }],
+      })
+    } catch(e) { console.error("Wrong network", e) }
+  }
 
   const signer = await provider.getSigner()
   const address = await signer.getAddress()
-
-  const net = await provider.getNetwork()
-  $('net').textContent = 'Network: chainId=' + net.chainId.toString()
-  $('addr').textContent = 'Wallet: ' + address
-
+  
   state.provider = provider
   state.signer = signer
   state.address = address
-
+  
   await refreshUsdcBalance()
-
-  return { provider, signer, address }
+  return address
 }
+
+// --- USDC & APPROVE ---
 
 const USDC_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -168,250 +117,103 @@ const USDC_ABI = [
   'function decimals() view returns (uint8)',
 ]
 
-const ESCROW_ABI = ['function deposit(uint256 battleId, uint256 amount)']
-
-function explorerTxUrl(hash) {
-  const base = state.cfg?.arc?.explorer || 'https://testnet.arcscan.app'
-  return base.replace(/\/$/, '') + '/tx/' + hash
-}
-
-// ===== deposit cache (fix P1_ALREADY) =====
-function depositKey(battleId) {
-  return 'PB_DEPOSIT_TX_' + String(battleId) + '_' + String(state.address || '').toLowerCase()
-}
-
-function saveDepositTx(battleId, txHash) {
-  try {
-    localStorage.setItem(depositKey(battleId), txHash)
-  } catch (e) {}
-}
-
-function loadDepositTx(battleId) {
-  try {
-    return localStorage.getItem(depositKey(battleId))
-  } catch (e) {
-    return null
-  }
-}
-// =========================================
-
-async function getUsdcContract(readOrWrite) {
-  const usdcAddr = state.cfg?.contracts?.usdc
-  if (!usdcAddr) throw new Error('USDC address missing on server (/api/config)')
-  return new ethers.Contract(usdcAddr, USDC_ABI, readOrWrite)
-}
-
-async function getEscrowContract(write) {
-  const escrowAddr = state.cfg?.contracts?.escrow
-  if (!escrowAddr) throw new Error('Escrow address missing on server (/api/config)')
-  return new ethers.Contract(escrowAddr, ESCROW_ABI, write)
+async function getUsdcContract(signerOrProvider) {
+  return new ethers.Contract(state.cfg.contracts.usdc, USDC_ABI, signerOrProvider)
 }
 
 async function refreshUsdcBalance() {
   if (!state.provider || !state.address) return
   const usdc = await getUsdcContract(state.provider)
-
-  try {
-    state.usdcDecimals = Number(await usdc.decimals())
-  } catch (e) {
-    state.usdcDecimals = 6
-  }
-
+  try { state.usdcDecimals = Number(await usdc.decimals()) } catch {}
   const bal = await usdc.balanceOf(state.address)
   $('usdc').textContent = 'USDC: ' + ethers.formatUnits(bal, state.usdcDecimals)
 }
 
 async function approveUsdc() {
-  if (!state.signer || !state.address) throw new Error('Wallet not connected')
-
-  const stake = Number($('stakeSel').value || '0') || 0
-  if (!stake) throw new Error('Выбери stake')
+  if (!state.signer) throw new Error('Wallet not connected')
+  const stake = Number($('stakeSel').value || '0')
+  if (!stake) throw new Error('Select stake')
 
   const usdc = await getUsdcContract(state.signer)
-  const escrowAddr = state.cfg?.contracts?.escrow
+  const escrowAddr = state.cfg.contracts.escrow
   const amount = ethers.parseUnits(String(stake), state.usdcDecimals)
 
   const allowance = await usdc.allowance(state.address, escrowAddr)
   if (allowance >= amount) {
-    setStatus('Approve не нужен, allowance уже достаточно')
+    setStatus('Already approved!')
     return
   }
 
-  if (allowance > 0n) {
-    setStatus('Reset allowance to 0...')
-    const tx0 = await usdc.approve(escrowAddr, 0)
-    setStatus('Reset tx: ' + explorerTxUrl(tx0.hash))
-    await tx0.wait()
-  }
-
-  const MAX = 2n ** 256n - 1n
-  setStatus('Approve USDC...')
-  const tx = await usdc.approve(escrowAddr, MAX)
-  setStatus('Approve tx: ' + explorerTxUrl(tx.hash))
+  setStatus('Approving USDC...')
+  const tx = await usdc.approve(escrowAddr, ethers.MaxUint256)
+  setStatus('Approve tx sent. Waiting...')
   await tx.wait()
-  setStatus('Approve confirmed')
+  setStatus('Approved!')
 }
+
+// --- GAME LOGIC ---
 
 async function pollMatch(address, stake) {
+  // Опрашиваем сервер, пока не найдем соперника
   for (;;) {
-    const q =
-      '/api/match?address=' +
-      encodeURIComponent(address) +
-      '&stake=' +
-      encodeURIComponent(stake)
+    const q = `/api/match?address=${encodeURIComponent(address)}&stake=${encodeURIComponent(stake)}`
     const r = await apiGet(q)
     if (r.ok && r.status === 'matched') return r
-    await new Promise((resolve) => setTimeout(resolve, 2000))
+    await new Promise((r) => setTimeout(r, 2000))
   }
 }
-
-async function doDeposit(battleId, stake) {
-  if (!state.signer) throw new Error('No signer')
-  const escrow = await getEscrowContract(state.signer)
-
-  const amount = ethers.parseUnits(String(stake), state.usdcDecimals)
-
-  setStatus('Deposit to escrow...')
-  const tx = await escrow.deposit(battleId, amount)
-  setStatus('Deposit tx: ' + explorerTxUrl(tx.hash))
-
-  const receipt = await tx.wait()
-  if (receipt.status !== 1) throw new Error('Deposit tx reverted')
-
-  return tx.hash
-}
-
-async function confirmDeposit(battleId, address, txHash) {
-  setStatus('Confirm deposit on backend...')
-  const r = await apiPost('/api/battles/' + battleId + '/confirm-deposit', {
-    address,
-    txHash,
-  })
-  if (!r.ok) throw new Error(r.error || 'confirm-deposit failed')
-  setStatus('Deposit confirmed in DB')
-}
-
-async function waitForGeneration(battleId, timeoutMs = 10 * 60 * 1000) {
-  const started = Date.now();
-
-  while (true) {
-    const s = await apiGet(`/api/battles/${battleId}/status`);
-
-    if (s.ok) {
-      if (s.genStatus === 'done') return s;
-      if (s.genStatus === 'error') throw new Error(s.error || 'generation failed');
-
-      setStatus(`Генерация: ${s.genStatus}... (battleId=${battleId})`);
-    }
-
-    if (Date.now() - started > timeoutMs) {
-      throw new Error('Timeout waiting for generation');
-    }
-
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
-
 
 async function playFlow() {
   const authed = await mustBeTwitterAuthed()
-  if (!authed) throw new Error('Сначала Twitter логин')
+  if (!authed) throw new Error('Login with Twitter first')
+  if (!state.address) throw new Error('Connect wallet first')
 
-  if (!state.address || !state.signer) throw new Error('Сначала подключи кошелёк')
+  const stake = Number($('stakeSel').value)
+  if (!stake) throw new Error('Select stake')
 
-  const stake = Number($('stakeSel').value || '0') || 0
-  const prompt = String($('prompt').value || '').trim()
-
-  if (!stake) throw new Error('Выбери stake')
-  if (!prompt) throw new Error('Напиши prompt')
-
-  setStatus('Matchmaking...')
-  const r = await apiPost('/api/play', { address: state.address, stake, prompt })
-  if (!r.ok) throw new Error('Ошибка /api/play: ' + (r.error || 'unknown'))
+  setStatus('Searching for opponent...')
+  
+  // 1. Отправляем заявку (без промпта)
+  const r = await apiPost('/api/play', { address: state.address, stake }) 
+  if (!r.ok) throw new Error('Error: ' + r.error)
 
   let battleId = null
 
   if (r.status === 'waiting') {
-    setStatus('В очереди, ждём соперника...')
+    setStatus('Waiting in queue...')
     const m = await pollMatch(state.address, stake)
     battleId = m.battleId
-    setStatus('Соперник найден, battleId=' + battleId)
   } else if (r.status === 'matched') {
     battleId = r.battleId
-    setStatus('Сразу matched, battleId=' + battleId)
-  } else {
-    throw new Error('Неизвестный ответ /api/play')
   }
 
-  // ===== idempotent deposit =====
-  let txHash = loadDepositTx(battleId)
-
-  if (txHash) {
-    setStatus('Deposit уже был отправлен ранее, подтверждаем в DB: ' + explorerTxUrl(txHash))
-  } else {
-    txHash = await doDeposit(battleId, stake)
-    saveDepositTx(battleId, txHash)
-  }
-
-  await confirmDeposit(battleId, state.address, txHash)
-  const gen = await waitForGeneration(battleId);
-setStatus('Готово. Открываю галерею...');
-window.location.href = `/gallery.html?battleId=${battleId}`;
-
-  // ==============================
-
-  setStatus('Готово: battleId=' + battleId + '\nDeposit: ' + explorerTxUrl(txHash))
-  await refreshUsdcBalance()
+  // 2. Переходим на Арену
+  window.location.href = `/battle.html?battleId=${battleId}`;
 }
 
-window.addEventListener('DOMContentLoaded', async () => {
-  try {
-    await loadConfig()
-  } catch (e) {
-    setStatus('Config error: ' + (e?.message || String(e)))
-  }
+// --- INIT ---
 
+window.addEventListener('DOMContentLoaded', async () => {
+  try { await loadConfig() } catch (e) { setStatus('Config error') }
   await refreshGating()
 
-  document.addEventListener('pb:auth-changed', async () => {
-    await refreshGating()
-  })
+  document.addEventListener('pb:auth-changed', refreshGating)
 
   $('connectBtn').addEventListener('click', async () => {
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await connectWallet()
-      await refreshGating()
-      setStatus('Wallet connected')
-    } catch (e) {
-      setStatus('Connect error: ' + (e?.message || String(e)))
-    }
+    try { await connectWallet(); await refreshGating(); } 
+    catch (e) { setStatus('Connect error: ' + e.message) }
   })
 
   $('approveBtn').addEventListener('click', async () => {
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await approveUsdc()
-      await refreshUsdcBalance()
-    } catch (e) {
-      setStatus('Approve error: ' + (e?.message || String(e)))
-    }
+    try { await approveUsdc() } 
+    catch (e) { setStatus('Approve error: ' + e.message) }
   })
 
-  $('playBtn').addEventListener('click', async () => {
+  $('playBtn').addEventListener('click', async () => { // Переименовали ID кнопки в player.html? Если нет, оставь playBtn
     if (playLocked) return
     playLocked = true
-
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await playFlow()
-    } catch (e) {
-      setStatus('Play error: ' + (e?.message || String(e)))
-    } finally {
-      playLocked = false
-    }
+    try { await playFlow() } 
+    catch (e) { setStatus('Error: ' + e.message) } 
+    finally { playLocked = false }
   })
 })

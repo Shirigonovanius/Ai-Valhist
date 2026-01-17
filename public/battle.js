@@ -1,349 +1,245 @@
-const $ = (id) => document.getElementById(id)
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const battleId = params.get('battleId');
 
-const state = {
-  cfg: null,
-  provider: null,
-  signer: null,
-  address: null,
-  usdcDecimals: 6,
-  battleId: null,
-  battle: null,
-  deposits: [],
-  works: [],
-}
+let provider, signer, address;
 
-function setStatus(txt) {
-  const el = $('status')
-  if (el) el.textContent = txt
-}
+// ABI для голосования (на будущее)
+const VOTING_ABI = ["function vote(uint256 battleId, int8 val) external"];
 
-function setEnabled(el, enabled) {
-  if (!el) return
-  el.disabled = !enabled
-  el.style.opacity = enabled ? '1' : '0.55'
-}
+async function init() {
+  if($('statusBadge')) $('statusBadge').textContent = 'Initializing...';
 
-const API_BASE = 'http://localhost:4000'
-const apiUrl = (p) => API_BASE.replace(/\/$/, '') + p
-
-async function apiGet(url) {
-  const res = await fetch(apiUrl(url), { credentials: 'include' })
-  return res.json()
-}
-
-async function apiPost(url, body) {
-  const res = await fetch(apiUrl(url), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(body || {}),
-  })
-  return res.json()
-}
-
-
-function qs(name) {
-  const u = new URL(window.location.href)
-  return u.searchParams.get(name)
-}
-
-async function mustBeTwitterAuthed() {
-  if (!window.pbAuth) return false
-  const data = await window.pbAuth.getMe()
-  return Boolean(data && data.ok && data.user)
-}
-
-async function loadConfig() {
-  const cfg = await apiGet('/api/config')
-  if (!cfg.ok) throw new Error('Cannot load /api/config')
-  state.cfg = cfg
-  return cfg
-}
-
-function explorerTxUrl(hash) {
-  const base = state.cfg?.arc?.explorer || 'https://testnet.arcscan.app'
-  return base.replace(/\/$/, '') + '/tx/' + hash
-}
-
-async function refreshAuthUI() {
-  const authed = await mustBeTwitterAuthed()
-
-  const loginBtn = $('loginBtn')
-  const logoutBtn = $('logoutBtn')
-
-  const returnTo = window.location.pathname + window.location.search
-  if (loginBtn) {
-    loginBtn.href = '/api/auth/twitter?returnTo=' + encodeURIComponent(returnTo)
-    loginBtn.style.display = authed ? 'none' : 'inline-flex'
-  }
-  if (logoutBtn) logoutBtn.style.display = authed ? 'inline-flex' : 'none'
-
-  return authed
-}
-
-async function refreshGating() {
-  const authed = await mustBeTwitterAuthed()
-  const connected = Boolean(state.address)
-
-  setEnabled($('connectBtn'), authed && !connected)
-  setEnabled($('approveBtn'), authed && connected)
-  setEnabled($('depositBtn'), authed && connected)
-  setEnabled($('submitWorkBtn'), authed && connected)
-
-  const cbtn = $('connectBtn')
-  if (cbtn) cbtn.textContent = connected ? 'Wallet connected' : 'Connect wallet'
-
-  if (!authed) {
-    $('addr').textContent = 'Wallet: blocked (login with Twitter first)'
-    $('net').textContent = 'Network: —'
-    $('usdc').textContent = 'USDC: —'
-    setStatus('Сначала залогинься через Twitter')
-    return false
+  // 1. Проверяем ID
+  if (!battleId) {
+      showError('Error: No Battle ID in URL');
+      return;
   }
 
-  if (!connected) setStatus('Twitter ok, теперь подключи кошелёк')
-  return true
+  // 2. Подключаем кошелек (тихо)
+  if (window.ethereum) {
+      try {
+        provider = new ethers.BrowserProvider(window.ethereum);
+        signer = await provider.getSigner();
+        address = await signer.getAddress();
+      } catch (e) {
+        console.warn("Wallet not connected yet or locked");
+      }
+  }
+
+  // 3. Запускаем цикл проверки
+  checkLoop();
 }
 
-async function getProvider() {
-  if (!window.ethereum) throw new Error('No wallet found (install Rabby/MetaMask)')
-  return new ethers.BrowserProvider(window.ethereum)
+async function checkLoop() {
+  await checkStatus();
+  setTimeout(checkLoop, 2000);
 }
 
-async function ensureCorrectNetwork(provider) {
-  const wantDec = Number(state.cfg?.arc?.chainId || 0)
-  const wantHex = state.cfg?.arc?.chainIdHex
-  if (!wantDec || !wantHex) return
-
-  const net = await provider.getNetwork()
-  const haveDec = Number(net.chainId)
-  $('net').textContent = 'Network: chainId=' + haveDec
-
-  if (haveDec === wantDec) return
-
-  await window.ethereum.request({
-    method: 'wallet_switchEthereumChain',
-    params: [{ chainId: wantHex }],
-  })
-}
-
-const USDC_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function approve(address spender, uint256 value) returns (bool)',
-  'function decimals() view returns (uint8)',
-]
-
-const ESCROW_ABI = [
-  'function deposit(uint256 battleId, uint256 amount)',
-]
-
-async function getUsdc(readOrWrite) {
-  const usdcAddr = state.cfg?.contracts?.usdc
-  if (!usdcAddr) throw new Error('USDC missing in /api/config')
-  return new ethers.Contract(usdcAddr, USDC_ABI, readOrWrite)
-}
-
-async function getEscrow(write) {
-  const escrowAddr = state.cfg?.contracts?.escrow
-  if (!escrowAddr) throw new Error('ESCROW missing in /api/config')
-  return new ethers.Contract(escrowAddr, ESCROW_ABI, write)
-}
-
-async function refreshUsdcBalance() {
-  if (!state.provider || !state.address) return
-  const usdc = await getUsdc(state.provider)
+async function checkStatus() {
   try {
-    state.usdcDecimals = Number(await usdc.decimals())
-  } catch (e) {
-    state.usdcDecimals = 6
+    const res = await fetch(`/api/battles/${battleId}/status`);
+    if (!res.ok) throw new Error(`Server Error: ${res.status}`);
+    
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Unknown Data Error');
+    
+    updateUI(data);
+  } catch (e) { 
+    console.error(e);
+    // Пишем ошибку на экран, чтобы ты её увидел!
+    showError(e.message);
   }
-  const bal = await usdc.balanceOf(state.address)
-  $('usdc').textContent = 'USDC: ' + ethers.formatUnits(bal, state.usdcDecimals)
 }
 
-async function connectWallet() {
-  const provider = await getProvider()
-  await provider.send('eth_requestAccounts', [])
-  await ensureCorrectNetwork(provider)
-
-  const signer = await provider.getSigner()
-  const address = await signer.getAddress()
-  const net = await provider.getNetwork()
-
-  state.provider = provider
-  state.signer = signer
-  state.address = address
-
-  $('net').textContent = 'Network: chainId=' + net.chainId
-  $('addr').textContent = 'Wallet: ' + address
-
-  await refreshUsdcBalance()
-  await refreshGating()
+function showError(msg) {
+    if($('statusBadge')) {
+        $('statusBadge').textContent = 'Error: ' + msg;
+        $('statusBadge').style.background = '#ef4444'; // Красный
+        $('statusBadge').style.color = '#fff';
+    }
 }
 
-async function approveMax() {
-  if (!state.signer || !state.address) throw new Error('Wallet not connected')
-  const stake = Number($('stakeSel').value || '0') || 0
-  if (!stake) throw new Error('Choose stake')
+function updateUI(data) {
+  // Безопасное получение адреса
+  const myAddr = address ? address.toLowerCase() : '';
+  
+  // Безопасная проверка массивов (чтобы не зависало, если deposits undefined)
+  const deposits = data.deposits || [];
+  const prompts = data.prompts || [];
 
-  const usdc = await getUsdc(state.signer)
-  const escrowAddr = state.cfg?.contracts?.escrow
-  const MAX = (2n ** 256n) - 1n
+  let iDeposited = deposits.includes(myAddr);
+  const iPrompted = prompts.includes(myAddr);
 
-  setStatus('Approve USDC…')
-  const tx = await usdc.approve(escrowAddr, MAX)
-  setStatus('Approve tx: ' + explorerTxUrl(tx.hash))
-  await tx.wait()
-  setStatus('Approve confirmed')
-  await refreshUsdcBalance()
-}
-
-function depositKey(battleId, address) {
-  return `pb_depositTx:${battleId}:${address.toLowerCase()}`
-}
-
-function loadDepositTx(battleId, address) {
-  try { return localStorage.getItem(depositKey(battleId, address)) } catch (e) { return null }
-}
-
-function saveDepositTx(battleId, address, txHash) {
-  try { localStorage.setItem(depositKey(battleId, address), txHash) } catch (e) {}
-}
-
-async function doDeposit() {
-  if (!state.signer || !state.address) throw new Error('Wallet not connected')
-  if (!state.battleId) throw new Error('battleId missing')
-
-  const stake = Number($('stakeSel').value || '0') || 0
-  if (!stake) throw new Error('Choose stake')
-
-  const cached = loadDepositTx(state.battleId, state.address)
-  if (cached) {
-    setStatus('Deposit уже был отправлен ранее: ' + explorerTxUrl(cached))
-    const r = await apiPost(`/api/battles/${state.battleId}/confirm-deposit`, { address: state.address, txHash: cached })
-    if (!r.ok) throw new Error(r.error || 'confirm failed')
-    setStatus('Deposit подтверждён в БД')
-    return
+  // Обновляем тексты (если элементы есть в HTML)
+  if($('themeText')) $('themeText').textContent = data.theme || 'Loading...';
+  if($('arenaThemeDisplay')) $('arenaThemeDisplay').textContent = data.theme || 'Loading...';
+  if($('statusBadge')) {
+      $('statusBadge').textContent = `Status: ${data.genStatus}`;
+      $('statusBadge').style.background = '#374151'; // Серый (сброс цвета ошибки)
   }
 
-  const escrow = await getEscrow(state.signer)
-  const amount = ethers.parseUnits(String(stake), state.usdcDecimals)
+  const s1 = $('stepDeposit');
+  const s2 = $('stepPrompt');
+  const s3 = $('stepArena');
 
-  setStatus('Deposit to escrow…')
-  const tx = await escrow.deposit(state.battleId, amount)
-  setStatus('Deposit tx: ' + explorerTxUrl(tx.hash))
-  const receipt = await tx.wait()
-  if (receipt.status !== 1) throw new Error('Deposit reverted')
+  if (!s1 || !s2 || !s3) return; // Если HTML еще не прогрузился
 
-  saveDepositTx(state.battleId, state.address, tx.hash)
-
-  const r = await apiPost(`/api/battles/${state.battleId}/confirm-deposit`, { address: state.address, txHash: tx.hash })
-  if (!r.ok) throw new Error(r.error || 'confirm failed')
-  setStatus('Deposit подтверждён в БД')
-}
-
-async function submitWork() {
-  if (!state.address) throw new Error('Wallet not connected')
-  const imageUrl = String($('imageUrl').value || '').trim()
-  if (!imageUrl) throw new Error('Paste image URL')
-
-  const r = await apiPost(`/api/battles/${state.battleId}/submit-work`, { address: state.address, imageUrl })
-  if (!r.ok) throw new Error(r.error || 'submit-work failed')
-  setStatus('Work saved')
-}
-
-async function refreshBattleState() {
-  if (!state.battleId) return
-  const r = await apiGet(`/api/battles/${state.battleId}/state`)
-  if (!r.ok) return
-
-  state.battle = r.battle
-  state.deposits = r.deposits || []
-  state.works = r.works || []
-
-  $('battleTitle').textContent = `Battle: #${state.battleId} status=${state.battle.status}`
-
-  const lines = []
-  lines.push(`Players: ${state.battle.player1 || '—'} vs ${state.battle.player2 || '—'}`)
-  lines.push(`Deposits: ${state.deposits.length}`)
-  for (const d of state.deposits) lines.push(`- ${d.player_address}: ${d.amount} base units`)
-  lines.push(`Works: ${state.works.length}`)
-  for (const w of state.works) lines.push(`- ${w.player_address}: ${w.image_url}`)
-
-  $('stateBox').textContent = lines.join('\n')
-
-  // UI gating based on battle status
-  const authed = await mustBeTwitterAuthed()
-  const connected = Boolean(state.address)
-
-  setEnabled($('approveBtn'), authed && connected)
-  setEnabled($('depositBtn'), authed && connected)
-  setEnabled($('submitWorkBtn'), authed && connected && state.deposits.length >= 1)
-
-  await refreshUsdcBalance()
-}
-
-window.addEventListener('DOMContentLoaded', async () => {
-  state.battleId = Number(qs('battleId') || 0) || null
-  if (!state.battleId) {
-    $('stateBox').textContent = 'battleId missing in URL'
-    setEnabled($('connectBtn'), false)
-    return
+  // === ЛОГИКА ВОССТАНОВЛЕНИЯ ОПЛАТЫ ===
+  // Если сервер думает, что мы не платили, а мы точно платили (есть запись в браузере)
+  if (!iDeposited && myAddr) {
+      const cachedTx = localStorage.getItem(`pb_dep_${battleId}_${myAddr}`);
+      if (cachedTx) {
+          iDeposited = true; 
+          // Фоновая попытка подтвердить
+          fetch(`/api/battles/${battleId}/confirm-deposit`, {
+              method: 'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ address: myAddr, txHash: cachedTx })
+          }).catch(() => {});
+      }
   }
 
-  await loadConfig()
-  await window.pbInitTwitterUI?.()
-  await refreshAuthUI()
-  await refreshGating()
+  // === ПЕРЕКЛЮЧЕНИЕ ЭКРАНОВ ===
 
-  $('logoutBtn')?.addEventListener('click', async () => {
-    await window.pbAuth.logout()
-  })
+  // 1. АРЕНА (Если генерация уже идет или закончилась)
+  if (data.genStatus === 'running' || data.genStatus === 'done') {
+     showSection(s3);
+     updateArena(data);
+     return;
+  }
 
-  $('connectBtn').addEventListener('click', async () => {
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await connectWallet()
-      setStatus('Wallet connected')
-    } catch (e) {
-      setStatus('Connect error: ' + (e?.message || String(e)))
+  // 2. ДЕПОЗИТ (Если я еще не платил)
+  if (!iDeposited) {
+     showSection(s1);
+     const btn = $('payDepositBtn');
+     if(btn) btn.onclick = () => doDeposit(data.stake);
+     return;
+  }
+
+  // 3. ПРОМПТ (Если я заплатил, но не отправил промпт)
+  if (iDeposited && !iPrompted) {
+     showSection(s2);
+     const btn = $('submitPromptBtn');
+     if(btn) btn.onclick = () => submitPrompt();
+     return;
+  }
+
+  // 4. ОЖИДАНИЕ (Я всё сделал, жду второго)
+  showSection(s3);
+  if($('statusBadge')) $('statusBadge').textContent = 'Waiting for opponent...';
+  if($('timer')) $('timer').style.display = 'none';
+}
+
+function showSection(visibleSection) {
+    if($('stepDeposit')) $('stepDeposit').style.display = 'none';
+    if($('stepPrompt')) $('stepPrompt').style.display = 'none';
+    if($('stepArena')) $('stepArena').style.display = 'none';
+    if(visibleSection) visibleSection.style.display = 'block';
+}
+
+function updateArena(data) {
+  const img1 = $('img1');
+  const img2 = $('img2');
+  
+  // Картинки
+  if(img1) img1.src = data.p1Image ? data.p1Image : 'https://via.placeholder.com/400x400?text=Generating...';
+  if(img2) img2.src = data.p2Image ? data.p2Image : 'https://via.placeholder.com/400x400?text=Generating...';
+  
+  // Победа
+  if (data.status === 'finished' && data.winner) {
+    if($('statusBadge')) {
+        $('statusBadge').textContent = '🏆 WINNER DECIDED 🏆';
+        $('statusBadge').style.background = '#10b981';
     }
-  })
-
-  $('approveBtn').addEventListener('click', async () => {
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await approveMax()
-    } catch (e) {
-      setStatus('Approve error: ' + (e?.message || String(e)))
+    
+    const w = data.winner.toLowerCase();
+    const p1 = (data.player1 || '').toLowerCase();
+    
+    // Подсветка карт
+    if (w === p1) {
+       if($('card1')) $('card1').classList.add('winner');
+       if($('card2')) $('card2').classList.add('loser');
+    } else {
+       if($('card2')) $('card2').classList.add('winner');
+       if($('card1')) $('card1').classList.add('loser');
     }
-  })
 
-  $('depositBtn').addEventListener('click', async () => {
-    try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await doDeposit()
-      await refreshBattleState()
-    } catch (e) {
-      setStatus('Deposit error: ' + (e?.message || String(e)))
+    // Салют (один раз)
+    if (!window.animationPlayed && typeof confetti !== 'undefined') {
+        window.animationPlayed = true;
+        launchConfetti();
     }
-  })
+  }
+}
 
-  $('submitWorkBtn').addEventListener('click', async () => {
+function launchConfetti() {
+    var duration = 3000;
+    var end = Date.now() + duration;
+    (function frame() {
+      confetti({ particleCount: 5, angle: 60, spread: 55, origin: { x: 0 } });
+      confetti({ particleCount: 5, angle: 120, spread: 55, origin: { x: 1 } });
+      if (Date.now() < end) requestAnimationFrame(frame);
+    }());
+}
+
+// === ДЕЙСТВИЯ (Кнопки) ===
+
+async function doDeposit(stakeVal) {
+  try {
+    const statusEl = $('depositStatus');
+    statusEl.textContent = 'Loading config...';
+    
+    const cRes = await fetch('/api/config');
+    const cfg = await cRes.json();
+
+    const usdc = new ethers.Contract(cfg.contracts.usdc, ['function approve(address,uint256)'], signer);
+    const escrow = new ethers.Contract(cfg.contracts.escrow, ['function deposit(uint256,uint256)'], signer);
+    const amt = ethers.parseUnits(String(stakeVal), 6);
+
+    statusEl.textContent = 'Approving...';
     try {
-      const ok = await refreshGating()
-      if (!ok) return
-      await submitWork()
-      await refreshBattleState()
-    } catch (e) {
-      setStatus('Submit error: ' + (e?.message || String(e)))
-    }
-  })
+        const tx1 = await usdc.approve(cfg.contracts.escrow, amt);
+        await tx1.wait();
+    } catch(e) { console.warn("Approve skipped/failed", e); }
 
-  await refreshBattleState()
-  setInterval(refreshBattleState, 2500)
-})
+    statusEl.textContent = 'Depositing...';
+    let txHash;
+    try {
+        const tx2 = await escrow.deposit(battleId, amt);
+        txHash = tx2.hash;
+        localStorage.setItem(`pb_dep_${battleId}_${address.toLowerCase()}`, txHash);
+        await tx2.wait();
+    } catch (e) {
+        if (e.message && (e.message.includes("P1_ALREADY") || e.message.includes("P2_ALREADY"))) {
+            txHash = "0x_ALREADY_PAID_RECOVERY"; 
+            localStorage.setItem(`pb_dep_${battleId}_${address.toLowerCase()}`, txHash);
+        } else { throw e; }
+    }
+
+    statusEl.textContent = 'Syncing...';
+    await fetch(`/api/battles/${battleId}/confirm-deposit`, {
+      method: 'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ address: address, txHash })
+    });
+    // Экран сам обновится через 2 сек
+  } catch(e) {
+    alert(e.message);
+    if($('depositStatus')) $('depositStatus').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function submitPrompt() {
+  const val = $('promptInput').value;
+  if(!val) return alert('Enter prompt');
+  
+  $('promptStatus').textContent = 'Sending...';
+  const r = await fetch(`/api/battles/${battleId}/submit-prompt`, {
+      method: 'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ address, prompt: val })
+  });
+  const j = await r.json();
+  if(j.ok) $('promptStatus').textContent = 'Saved! Waiting for opponent...';
+  else alert(j.error);
+}
+
+window.addEventListener('DOMContentLoaded', init);

@@ -3,75 +3,95 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Prompt Battle — Battle</title>
+  <title>Battle Arena</title>
   <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script> 
+  <style>
+    /* Общие стили */
+    .center-box {
+       max-width: 600px; margin: 40px auto; text-align: center;
+       background: #1f2937; padding: 30px; border-radius: 16px; border: 1px solid #374151;
+    }
+    .task-text { font-size: 24px; font-weight: bold; color: #fbbf24; margin: 20px 0; }
+    
+    .cards-wrapper { display: flex; gap: 20px; justify-content: center; margin-top: 20px; flex-wrap: wrap; }
+    
+    .card { 
+      width: 45%; min-width: 300px;
+      background: #111; padding: 10px; border-radius: 10px; 
+      transition: all 0.5s ease; /* Плавная анимация */
+      border: 4px solid transparent; /* Резерв места под рамку */
+    }
+    
+    .card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; }
+
+    /* СТИЛИ ПОБЕДЫ (которых не хватало) */
+    .winner { 
+      border-color: #10b981; 
+      transform: scale(1.05); 
+      box-shadow: 0 0 30px rgba(16, 185, 129, 0.4);
+    }
+    .loser { 
+      opacity: 0.5; 
+      transform: scale(0.95);
+      filter: grayscale(0.8);
+    }
+    
+    .theme-badge {
+        background: #374151; color: #fff; padding: 5px 10px; 
+        border-radius: 6px; font-size: 14px; margin-top: 5px;
+    }
+  </style>
 </head>
 <body>
   <div class="container">
-    <header class="header">
-      <div>
-        <h1>Prompt Battle</h1>
+    <div style="text-align:center; padding-top:20px;">
+      <div id="statusBadge" style="background:#374151; padding:8px 20px; border-radius:20px; font-weight:bold; display:inline-block;">Loading...</div>
+    </div>
 
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin:8px 0 10px;">
-          <div>
-            <div id="me" class="muted">Loading…</div>
-            <div class="muted" style="font-size:12px;">Twitter нужен для голосования и участия</div>
-          </div>
+    <div id="stepDeposit" class="center-box" style="display:none;">
+      <h2>Шаг 1: Ставка</h2>
+      <p class="muted">Внесите депозит, чтобы увидеть секретное задание.</p>
+      <button id="payDepositBtn" class="btn" style="font-size: 18px; padding: 12px 24px; margin-top: 20px;">
+        Внести депозит (USDC)
+      </button>
+      <div id="depositStatus" class="muted" style="margin-top:10px;"></div>
+    </div>
 
-          <div style="display:flex; gap:8px;">
-            <a id="loginBtn" class="btn" href="#">Login with Twitter</a>
-            <button id="logoutBtn" class="btn" style="display:none;">Logout</button>
-          </div>
+    <div id="stepPrompt" class="center-box" style="display:none;">
+      <h2>Шаг 2: Задание</h2>
+      <div class="muted">Ваша тема:</div>
+      <div id="themeText" class="task-text">...</div>
+      
+      <textarea id="promptInput" class="input" rows="4" placeholder="Опишите картинку под эту тему..."></textarea>
+      <button id="submitPromptBtn" class="btn" style="width:100%; margin-top:10px;">
+        Отправить промпт
+      </button>
+      <div id="promptStatus" class="muted" style="margin-top:10px;"></div>
+    </div>
+
+    <div id="stepArena" style="display:none; text-align:center; margin-top:20px;">
+      <div style="margin-bottom: 20px;">
+        <span class="muted">Тема битвы:</span><br>
+        <span id="arenaThemeDisplay" class="task-text" style="font-size: 20px;">...</span>
+      </div>
+
+      <div id="timer" style="color:#ef4444; font-weight:bold; font-size:20px;"></div>
+      
+      <div class="cards-wrapper">
+        <div class="card" id="card1">
+           <h3 style="color:#6366f1;">Игрок 1</h3>
+           <img id="img1" src="https://via.placeholder.com/400x400?text=Waiting">
         </div>
-
-        <div id="battleTitle" class="muted">Battle: —</div>
-        <div id="net" class="muted">Network: —</div>
-        <div id="addr" class="muted">Wallet: not connected</div>
-        <div id="usdc" class="muted">USDC: —</div>
+        
+        <div style="font-size:30px; font-weight:900; color:#ec4899; align-self:center;">VS</div>
+        
+        <div class="card" id="card2">
+           <h3 style="color:#ec4899;">Игрок 2</h3>
+           <img id="img2" src="https://via.placeholder.com/400x400?text=Waiting">
+        </div>
       </div>
-
-      <div class="actions">
-        <button id="connectBtn" class="btn">Connect wallet</button>
-      </div>
-    </header>
-
-    <section class="panel">
-      <div class="panelHeader">
-        <h2>Status</h2>
-      </div>
-
-      <div id="stateBox" class="muted">Loading…</div>
-      <div id="status" class="muted" style="margin-top:10px;">Ready</div>
-    </section>
-
-    <section class="panel" style="margin-top:14px;">
-      <div class="panelHeader">
-        <h2>Actions</h2>
-      </div>
-
-      <label class="muted" style="display:block; margin-top:10px;">Stake (USDC)</label>
-      <select id="stakeSel" class="input">
-        <option value="1">1</option>
-        <option value="5">5</option>
-        <option value="10">10</option>
-      </select>
-
-      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button id="approveBtn" class="btn">Approve USDC</button>
-        <button id="depositBtn" class="btn">Deposit</button>
-      </div>
-
-      <div style="margin-top:14px;">
-        <label class="muted">Submit your result (image URL)</label>
-        <input id="imageUrl" class="input" placeholder="https://..." />
-        <button id="submitWorkBtn" class="btn" style="margin-top:10px;">Submit work</button>
-      </div>
-
-      <div style="margin-top:14px;">
-        <a class="btn" href="/gallery.html">Gallery</a>
-        <a class="btn" href="/admin.html" style="margin-left:8px;">Admin</a>
-      </div>
-    </section>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>

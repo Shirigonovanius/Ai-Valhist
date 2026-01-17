@@ -1,6 +1,4 @@
-// index.js
 require('dotenv').config()
-
 const express = require('express')
 const cors = require('cors')
 const cookieParser = require('cookie-parser')
@@ -11,1486 +9,258 @@ const { Pool } = require('pg')
 const path = require('path')
 const { ethers } = require('ethers')
 const fs = require('fs/promises')
-
 const OpenAIImport = require('openai')
 const OpenAI = OpenAIImport.default || OpenAIImport
 
+const THEMES = [
+  "Cyberpunk Samurai", "Sad Robot in the Rain", "Future City on Mars",
+  "Magical Forest Creature", "Steampunk Coffee Machine", "Underwater Castle",
+  "Space Cat", "Ancient Greek God in Modern Clothes", "Apocalyptic Wasteland",
+  "Neon Noir Detective", "Dragon made of Crystal", "Flying Island",
+  "A lonely astronaut", "Pikachu as a warrior", "Cybernetic Angel"
+];
 
-// === Arc testnet config (manual) ===
+// === ENV CHECKS ===
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is missing')
 
-// ВАЖНО: сюда вставь реальный адрес USDC в Arc testnet
-const USDC_ADDRESS = '0x3600000000000000000000000000000000000000'
-
-// ВАЖНО: сюда вставь адрес твоего задеплоенного PromptBattleEscrow
-const ESCROW_ADDRESS = '0x1d4578929a2779Bb364fA7d56be3b053A6c6140b'
-
-
-// ======================================================
-// 0) ENV checks
-// ======================================================
-
-if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is missing in .env')
-if (!process.env.SESSION_SECRET) throw new Error('SESSION_SECRET is missing in .env')
-
-// Twitter optional
-const TWITTER_CONSUMER_KEY = (process.env.TWITTER_CONSUMER_KEY || '').trim()
-const TWITTER_CONSUMER_SECRET = (process.env.TWITTER_CONSUMER_SECRET || '').trim()
-const TWITTER_CALLBACK_URL = (process.env.TWITTER_CALLBACK_URL || '').trim()
-
-const twitterEnabled = Boolean(TWITTER_CONSUMER_KEY && TWITTER_CONSUMER_SECRET && TWITTER_CALLBACK_URL)
-
-const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim() || null
 const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || '').trim() || null
-
 const isProd = process.env.NODE_ENV === 'production'
 
-// ======================================================
-// 1) App + middlewares
-// ======================================================
+// API Config
+const ARC_CHAIN_ID = Number(process.env.ARC_CHAIN_ID || 5042002)
+const ARC_EXPLORER = (process.env.ARC_EXPLORER || 'https://testnet.arcscan.app').trim()
+const USDC_ADDRESS = process.env.USDC_ADDRESS
+const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS
 
 const app = express()
-app.disable('x-powered-by')
-
-const rateLimit = require('express-rate-limit')
-const crypto = require('crypto')
-
 app.use('/generated', express.static(path.join(__dirname, 'public', 'generated')))
-
-app.use((req, res, next) => {
-  req.id = crypto.randomUUID()
-  res.setHeader('x-request-id', req.id)
-  next()
-})
-
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-})
-
-app.use('/api/', apiLimiter)
-
-
-if (isProd) app.set('trust proxy', 1)
-
-if (FRONTEND_ORIGIN) {
-  app.use(
-    cors({
-      origin: FRONTEND_ORIGIN,
-      credentials: true,
-    })
-  )
-}
-
+if (FRONTEND_ORIGIN) app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }))
 app.use(express.json({ limit: '1mb' }))
 app.use(cookieParser())
-
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: isProd,
-    },
-  })
-)
-
-app.use(passport.initialize())
-app.use(passport.session())
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'dev-secret',
+  resave: false, saveUninitialized: false,
+  cookie: { httpOnly: true, secure: isProd }
+}))
+if(process.env.TWITTER_CONSUMER_KEY) {
+    passport.use(new TwitterStrategy({
+        consumerKey: process.env.TWITTER_CONSUMER_KEY, 
+        consumerSecret: process.env.TWITTER_CONSUMER_SECRET, 
+        callbackURL: process.env.TWITTER_CALLBACK_URL
+      },
+      async (token, secret, profile, done) => done(null, profile)
+    ))
+    app.use(passport.initialize())
+    app.use(passport.session())
+}
+passport.serializeUser((u, d) => d(null, u))
+passport.deserializeUser((u, d) => d(null, u))
 
 app.use(express.static(path.join(__dirname, 'public')))
 
-// ВСТАВЛЯЕШЬ ТУТ
-// ======================================================
-// PUBLIC CONFIG (frontend reads it)
-// ======================================================
-
-const ARC_CHAIN_ID = Number(process.env.ARC_CHAIN_ID || 5042002)
-const ARC_EXPLORER = (process.env.ARC_EXPLORER || 'https://testnet.arcscan.app').trim()
-
-const USDC_ADDRESS_ENV = (process.env.USDC_ADDRESS || '').trim()
-const ESCROW_ADDRESS_ENV = (process.env.ESCROW_ADDRESS || '').trim()
-
-const ARC_RPC_URL_PUBLIC = (process.env.ARC_RPC_URL_PUBLIC || process.env.ARC_RPC_URL || '').trim()
-
-app.get('/api/config', (req, res) => {
-  res.json({
-    ok: true,
-    arc: {
-      chainId: ARC_CHAIN_ID,
-      chainIdHex: '0x' + Number(ARC_CHAIN_ID).toString(16),
-      explorer: ARC_EXPLORER,
-      rpcUrl: ARC_RPC_URL_PUBLIC || null,
-    },
-    contracts: {
-      usdc: USDC_ADDRESS_ENV || null,
-      escrow: ESCROW_ADDRESS_ENV || null,
-    },
-  })
-})
-
-
-
-// ======================================================
-// 2) DB
-// ======================================================
-
+// DB
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 20, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000,
 })
-
-// ==============================
-// Generation runner (autostart)
-// ==============================
-
-// ==============================
-// Generation runner (autostart)
-// ==============================
+pool.on('error', (err) => console.error('Unexpected DB error', err))
 
 const genLocks = new Set()
 
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null
-
-if (!openai) {
-  console.warn('OPENAI_API_KEY is missing, image generation will fail')
-}
-
-async function fetchWithTimeout(url, options, timeoutMs = 90000) {
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal })
-    return res
-  } finally {
-    clearTimeout(t)
-  }
-}
-
-
+// === GENERATION ===
 async function generateAndSavePng({ prompt, outPath }) {
-  const model = (process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5').trim()
-  const size = (process.env.OPENAI_IMAGE_SIZE || '1024x1024').trim()
-  const quality = (process.env.OPENAI_IMAGE_QUALITY || 'high').trim()
-  const output_format = (process.env.OPENAI_IMAGE_FORMAT || 'png').trim()
-
+  console.log(`[Gen] 🎨 Рисую: "${prompt.slice(0,20)}..."`)
   await fs.mkdir(path.dirname(outPath), { recursive: true })
-
-  const resp = await fetchWithTimeout('https://api.openai.com/v1/images/generations', {
-
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model,
-      prompt,
-      n: 1,
-      size,
-      quality,
-      output_format,
-      // ВАЖНО: НЕ отправляем response_format для gpt-image-*
-    }),
-  })
-
-  const text = await resp.text()
-  let json = null
-  try { json = JSON.parse(text) } catch {}
-
-  if (!resp.ok) {
-    const details = json ? JSON.stringify(json) : text.slice(0, 500)
-    throw new Error(`OpenAI Images API error ${resp.status}: ${details}`)
+  
+  try {
+    const resp = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: 'dall-e-3', prompt, n: 1, size: '1024x1024', response_format: 'b64_json' })
+    })
+    if (!resp.ok) {
+        const errText = await resp.text();
+        console.error(`[Gen] ❌ Ошибка OpenAI: ${errText}`);
+        throw new Error(errText);
+    }
+    const json = await resp.json()
+    await fs.writeFile(outPath, Buffer.from(json.data[0].b64_json, 'base64'))
+    console.log(`[Gen] ✅ Готово: ${outPath}`)
+  } catch (e) {
+    console.error(`[Gen] ❌ Ошибка:`, e.message);
+    throw e;
   }
-
-  const b64 = json?.data?.[0]?.b64_json
-  if (!b64) throw new Error('OpenAI returned no b64_json')
-
-  const buf = Buffer.from(b64, 'base64')
-  await fs.writeFile(outPath, buf)
 }
-
-
-
 
 async function maybeStartGeneration(pool, battleId) {
   if (genLocks.has(battleId)) return
+  
+  const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [battleId])
+  const b = bRes.rows[0]
+  if (!b || b.gen_status === 'running' || b.gen_status === 'done') return
 
-  const { rows } = await pool.query(
-    `SELECT id, player1, player2, gen_status
-       FROM battles
-      WHERE id=$1`,
-    [battleId]
-  )
-  const b = rows[0]
-  if (!b) return
+  const dRes = await pool.query(`SELECT COUNT(*) FROM deposits WHERE battle_id=$1 AND status='confirmed'`, [battleId])
+  const pRes = await pool.query(`SELECT COUNT(*) FROM prompts WHERE battle_id=$1`, [battleId])
+  
+  console.log(`[Check #${battleId}] Депозитов: ${dRes.rows[0].count}/2, Промптов: ${pRes.rows[0].count}/2`)
 
-  const status = String(b.gen_status || 'idle').toLowerCase()
-if (status === 'running' || status === 'done') return
+  if (Number(dRes.rows[0].count) < 2 || Number(pRes.rows[0].count) < 2) return 
 
-  const dep = await pool.query(
-    `SELECT COUNT(*)::int AS c
-       FROM deposits
-      WHERE battle_id=$1 AND status='confirmed'`,
-    [battleId]
-  )
-  const depCount = dep.rows[0]?.c || 0
-  if (depCount < 2) return
-
-  const upd = await pool.query(
-    `UPDATE battles
-        SET gen_status='running', gen_started_at=NOW(), gen_error=NULL
-      WHERE id=$1 AND (gen_status IS NULL OR gen_status NOT IN ('running','done'))
-      RETURNING id`,
-    [battleId]
-  )
-  if (!upd.rowCount) return
-
+  console.log(`[Start #${battleId}] ВСЕ ГОТОВО! НАЧИНАЮ ГЕНЕРАЦИЮ!`)
+  await pool.query(`UPDATE battles SET gen_status='running' WHERE id=$1`, [battleId])
   genLocks.add(battleId)
 
   setImmediate(async () => {
     try {
-      const pr = await pool.query(
-        `SELECT player_address, prompt
-           FROM prompts
-          WHERE battle_id=$1`,
-        [battleId]
-      )
-
-      const norm = (s) => String(s || '').toLowerCase()
-      const p1Addr = norm(b.player1)
-      const p2Addr = norm(b.player2)
-
-      const map = new Map(pr.rows.map(r => [norm(r.player_address), r.prompt]))
-      const p1Prompt = map.get(p1Addr)
-      const p2Prompt = map.get(p2Addr)
-
-      if (!p1Prompt || !p2Prompt) {
-        throw new Error('Missing prompts in prompts table for one or both players')
-      }
-
+      const pr = await pool.query(`SELECT player_address, prompt FROM prompts WHERE battle_id=$1`, [battleId])
+      const p1 = String(b.player1).toLowerCase();
+      const p2 = String(b.player2).toLowerCase();
+      const pMap = {}; pr.rows.forEach(r => pMap[String(r.player_address).toLowerCase()] = r.prompt);
+      
       const outDir = path.join(__dirname, 'public', 'generated')
-      const p1File = `battle-${battleId}-p1.png`
-      const p2File = `battle-${battleId}-p2.png`
+      const f1 = `battle-${battleId}-p1.png`, f2 = `battle-${battleId}-p2.png`
 
-      await generateAndSavePng({ prompt: p1Prompt, outPath: path.join(outDir, p1File) })
-      await generateAndSavePng({ prompt: p2Prompt, outPath: path.join(outDir, p2File) })
-
-await pool.query(
-  `UPDATE battles
-      SET gen_status='done',
-          p1_image_url=$2,
-          p2_image_url=$3,
-          img1_url=$2,
-          img2_url=$3,
-          gen_finished_at=NOW(),
-          gen_error=NULL
-    WHERE id=$1`,
-  [battleId, `/generated/${p1File}`, `/generated/${p2File}`]
-)
-
+      await Promise.all([
+        generateAndSavePng({ prompt: pMap[p1], outPath: path.join(outDir, f1) }),
+        generateAndSavePng({ prompt: pMap[p2], outPath: path.join(outDir, f2) })
+      ])
+      await pool.query(`UPDATE battles SET gen_status='done', p1_image_url=$2, p2_image_url=$3 WHERE id=$1`, [battleId, `/generated/${f1}`, `/generated/${f2}`])
     } catch (e) {
-      await pool.query(
-        `UPDATE battles
-            SET gen_status='error',
-                gen_error=$2
-          WHERE id=$1`,
-        [battleId, String(e?.message || e)]
-      )
-    } finally {
-      genLocks.delete(battleId)
-    }
+      await pool.query(`UPDATE battles SET gen_status='error', gen_error=$2 WHERE id=$1`, [battleId, e.message])
+    } finally { genLocks.delete(battleId) }
   })
 }
 
+// === ROUTES ===
+app.get('/api/config', (req, res) => res.json({ ok: true, contracts: { usdc: USDC_ADDRESS, escrow: ESCROW_ADDRESS } }))
+app.get('/api/auth/twitter', passport.authenticate('twitter'))
+app.get('/api/auth/twitter/callback', passport.authenticate('twitter', { failureRedirect: '/' }), (req, res) => res.redirect('/player.html'))
+app.get('/api/auth/me', (req, res) => res.json({ ok: true, user: req.user }))
 
+// MATCHMAKING
+const waitingByStake = {} 
+app.post('/api/play', async (req, res) => {
+  const { address, stake } = req.body
+  console.log(`[MATCH] ➡️ Запрос на игру от: ${address} (Ставка: ${stake})`)
+  
+  const stakeVal = Number(stake) || 1
+  const key = String(stakeVal)
 
-// ======================================================
-// 3) Passport Twitter
-// ======================================================
-
-if (!twitterEnabled) {
-  console.warn('Twitter auth DISABLED: missing TWITTER_* env vars')
-} else {
-  passport.use(
-    new TwitterStrategy(
-      {
-        consumerKey: TWITTER_CONSUMER_KEY,
-        consumerSecret: TWITTER_CONSUMER_SECRET,
-        callbackURL: TWITTER_CALLBACK_URL,
-        includeEmail: false,
-      },
-      async (token, tokenSecret, profile, done) => {
-        try {
-          const twitterId = profile.id
-          const username = profile.username || profile.displayName || 'user'
-          const twitterHandle = '@' + username
-
-          const userRes = await pool.query(
-            'SELECT id, twitter_id, twitter_handle FROM web_users WHERE twitter_id = $1',
-            [twitterId]
-          )
-
-          let user
-          if (userRes.rows.length === 0) {
-            const ins = await pool.query(
-              `INSERT INTO web_users (twitter_id, twitter_handle)
-               VALUES ($1, $2)
-               RETURNING id, twitter_id, twitter_handle`,
-              [twitterId, twitterHandle]
-            )
-            user = ins.rows[0]
-          } else {
-            user = userRes.rows[0]
-            if (user.twitter_handle !== twitterHandle) {
-              const upd = await pool.query(
-                `UPDATE web_users
-                 SET twitter_handle = $1
-                 WHERE id = $2
-                 RETURNING id, twitter_id, twitter_handle`,
-                [twitterHandle, user.id]
-              )
-              user = upd.rows[0]
-            }
-          }
-
-          return done(null, user)
-        } catch (err) {
-          console.error('TwitterStrategy error', err)
-          return done(err)
-        }
-      }
+  const waiter = waitingByStake[key];
+  if (waiter && waiter.address !== address) {
+    console.log(`[MATCH] 🔥 ПАРА НАЙДЕНА! ${waiter.address} VS ${address}`)
+    delete waitingByStake[key]
+    const theme = THEMES[Math.floor(Math.random() * THEMES.length)]
+    
+    const r = await pool.query(
+      `INSERT INTO battles (onchain_battle_id, player1, player2, stake, status, theme, gen_status) 
+       VALUES (0, $1, $2, $3, 'waiting_deposits', $4, 'idle') RETURNING id`,
+      [waiter.address, address, stakeVal, theme]
     )
-  )
-}
-
-passport.serializeUser((user, done) => done(null, user.id))
-
-passport.deserializeUser(async (id, done) => {
-  try {
-    const res = await pool.query(
-      'SELECT id, twitter_id, twitter_handle FROM web_users WHERE id = $1',
-      [id]
-    )
-    if (!res.rows.length) return done(null, false)
-    return done(null, res.rows[0])
-  } catch (err) {
-    return done(err)
+    console.log(`[MATCH] ✅ Битва создана! ID: ${r.rows[0].id}`)
+    return res.json({ ok: true, status: 'matched', battleId: r.rows[0].id })
+  } else {
+    waitingByStake[key] = { address, time: Date.now() }
+    console.log(`[MATCH] ⏳ Игрок ${address} добавлен в очередь.`)
+    return res.json({ ok: true, status: 'waiting' })
   }
 })
 
-// ======================================================
-// 4) Helpers
-// ======================================================
-
-function sanitizeReturnTo(v) {
-  if (!v) return null
-  const s = String(v).trim()
-  if (!s.startsWith('/')) return null
-  if (s.startsWith('//')) return null
-  if (s.includes('://')) return null
-  return s
-}
-
-function requireAdmin(req, res) {
-  if (!ADMIN_TOKEN) {
-    res.status(503).json({ ok: false, error: 'admin disabled (ADMIN_TOKEN not set)' })
-    return false
-  }
-  const token = (req.get('x-admin-token') || '').trim()
-  if (!token || token !== ADMIN_TOKEN) {
-    res.status(401).json({ ok: false, error: 'not authorized (admin token required)' })
-    return false
-  }
-  return true
-}
-
-function requireTwitterUser(req, res) {
-  if (!req.user) {
-    res.status(401).json({ ok: false, error: 'not authenticated with Twitter' })
-    return null
-  }
-  return req.user
-}
-
-function toInt(value, fallback) {
-  const n = parseInt(String(value), 10)
-  return Number.isFinite(n) ? n : fallback
-}
-
-// ======================================================
-// 5) Service
-// ======================================================
-
-app.get('/api/health', (req, res) => res.json({ ok: true }))
+app.get('/api/match', async (req, res) => {
+  const { address, stake } = req.query
+  const r = await pool.query(
+    `SELECT id FROM battles WHERE (player1=$1 OR player2=$1) AND stake=$2 AND status='waiting_deposits' ORDER BY created_at DESC LIMIT 1`,
+    [address, stake]
+  )
+  if (r.rows.length) return res.json({ ok: true, status: 'matched', battleId: r.rows[0].id })
+  return res.json({ ok: true, status: 'waiting' })
+})
 
 app.get('/api/battles/:id/status', async (req, res) => {
-  const battleId = Number(req.params.id)
+  const id = req.params.id
+  try { await maybeStartGeneration(pool, id) } catch {}
+  
+  const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [id])
+  const b = bRes.rows[0]
+  if (!b) return res.json({ok:false})
+  
+  const dep = await pool.query(`SELECT player_address FROM deposits WHERE battle_id=$1 AND status='confirmed'`, [id])
+  const prm = await pool.query(`SELECT player_address FROM prompts WHERE battle_id=$1`, [id])
 
-  try {
-    // автозапуск генерации, если условия уже выполнены
-    await maybeStartGeneration(pool, battleId)
-  } catch (e) {
-    console.error('maybeStartGeneration (status) failed', e)
-  }
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT gen_status, gen_error, p1_image_url, p2_image_url
-         FROM battles
-        WHERE id=$1`,
-      [battleId]
-    )
-
-    const b = rows[0]
-    if (!b) return res.json({ ok: false, error: 'battle not found' })
-
-    const s = String(b.gen_status || 'idle').toLowerCase()
-    const normalized =
-      (s === 'idle' || s === 'running' || s === 'done' || s === 'error') ? s : 'idle'
-
-    return res.json({
-      ok: true,
-      genStatus: normalized,
-      error: b.gen_error || null,
-      p1Image: b.p1_image_url || null,
-      p2Image: b.p2_image_url || null,
-    })
-  } catch (e) {
-    return res.json({ ok: false, error: e?.message || String(e) })
-  }
+  res.json({
+    ok: true,
+    status: b.status, winner: b.winner, theme: b.theme, stake: b.stake,
+    genStatus: b.gen_status || 'idle',
+    p1Image: b.p1_image_url, p2Image: b.p2_image_url,
+    player1: b.player1, player2: b.player2,
+    deposits: dep.rows.map(r => r.player_address.toLowerCase()),
+    prompts: prm.rows.map(r => r.player_address.toLowerCase())
+  })
 })
 
-
-
-app.get('/api/test-db', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW() as now')
-    res.json({ ok: true, now: result.rows[0].now })
-  } catch (err) {
-    console.error('DB error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// ======================================================
-// 6) Matchmaking
-// ======================================================
-
-// debug join-queue
-let waitingPlayer = null
-
-// main per-stake queue
-const waitingByStake = {}
-
-// POST /api/join-queue (debug)
-app.post('/api/join-queue', async (req, res) => {
-  const { address } = req.body
-  if (!address) return res.status(400).json({ ok: false, error: 'address is required' })
-
+app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
+  console.log(`[Deposit] Подтверждение для битвы ${req.params.id} от ${req.body.address}`)
   try {
     await pool.query(
-      `INSERT INTO users (address) VALUES ($1)
-       ON CONFLICT (address) DO NOTHING`,
-      [address]
+      `INSERT INTO deposits (battle_id, player_address, amount, tx_hash, status, chain_id, token_address, escrow_address) 
+       VALUES ($1, $2, 0, $3, 'confirmed', $4, $5, $6) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.body.address, req.body.txHash, ARC_CHAIN_ID, USDC_ADDRESS, ESCROW_ADDRESS]
     )
-
-    if (!waitingPlayer || waitingPlayer === address) {
-      waitingPlayer = address
-      return res.json({ ok: true, status: 'waiting' })
-    }
-
-    const player1 = waitingPlayer
-    const player2 = address
-    waitingPlayer = null
-
-    const stake = 1.0
-    const onchainBattleId = 0
-
-    const result = await pool.query(
-      `INSERT INTO battles (onchain_battle_id, player1, player2, stake, status)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [onchainBattleId, player1, player2, stake, 'waiting_prompts']
-    )
-
-    return res.json({
-      ok: true,
-      status: 'matched',
-      battleId: result.rows[0].id,
-      player1,
-      player2,
-    })
-  } catch (err) {
-    console.error('join-queue error', err)
-    return res.status(500).json({ ok: false, error: err.message })
-  }
+    res.json({ok:true})
+  } catch(e) { console.error(e); res.status(500).json({ok:false, error:e.message}) }
 })
 
-// POST /api/play
-// body: { address, stake, prompt }
-// returns: waiting + queuedAt OR matched + battleId
-app.post('/api/play', async (req, res) => {
-  const tw = requireTwitterUser(req, res)
-  if (!tw) return
-
-  const { address, stake, prompt } = req.body
-  if (!address || !prompt) {
-    return res.status(400).json({ ok: false, error: 'address and prompt are required' })
-  }
-
-  const stakeValue = Number(stake) || 1
-  const stakeKey = String(stakeValue)
-
+app.post('/api/battles/:id/submit-prompt', async (req, res) => {
+  console.log(`[Prompt] Промпт для битвы ${req.params.id} от ${req.body.address}`)
   try {
     await pool.query(
-      `INSERT INTO users (address) VALUES ($1)
-       ON CONFLICT (address) DO NOTHING`,
-      [address]
+      `INSERT INTO prompts (battle_id, player_address, prompt) VALUES ($1, $2, $3)
+       ON CONFLICT (battle_id, player_address) DO UPDATE SET prompt=EXCLUDED.prompt`,
+      [req.params.id, req.body.address, req.body.prompt]
     )
-
-    const waiting = waitingByStake[stakeKey]
-
-    if (!waiting || waiting.address === address) {
-      const queuedAt = new Date().toISOString()
-      waitingByStake[stakeKey] = { address, prompt, queuedAt }
-      return res.json({ ok: true, status: 'waiting', stake: stakeValue, queuedAt })
-    }
-
-    const player1 = waiting.address
-    const prompt1 = waiting.prompt
-    const player2 = address
-    const prompt2 = prompt
-    delete waitingByStake[stakeKey]
-
-    const onchainBattleId = 0
-
-    const battleRes = await pool.query(
-      `INSERT INTO battles (onchain_battle_id, player1, player2, stake, status)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [onchainBattleId, player1, player2, stakeValue, 'waiting_judgement']
-    )
-    const battleId = battleRes.rows[0].id
-
-    await pool.query(
-      `INSERT INTO prompts (battle_id, player_address, prompt)
-       VALUES ($1, $2, $3), ($1, $4, $5)`,
-      [battleId, player1, prompt1, player2, prompt2]
-    )
-
-    return res.json({
-      ok: true,
-      status: 'matched',
-      battleId,
-      stake: stakeValue,
-      player1,
-      player2,
-    })
-  } catch (err) {
-    console.error('play error', err)
-    return res.status(500).json({ ok: false, error: err.message })
-  }
+    res.json({ok:true})
+  } catch(e) { console.error(e); res.status(500).json({ok:false, error:e.message}) }
 })
 
-// GET /api/match?address=0x...&stake=5
-app.get('/api/match', async (req, res) => {
-  const tw = requireTwitterUser(req, res)
-  if (!tw) return
+app.post('/api/battles/:id/close', async (req, res) => {
+  await pool.query(`UPDATE battles SET status='finished', winner=$1 WHERE id=$2`, [req.body.winner, req.params.id])
+  res.json({ok:true})
+})
 
-  const address = String(req.query.address || '').trim()
-  const stakeValue = Number(req.query.stake) || 0
-
-  if (!address || !stakeValue) {
-    return res.status(400).json({ ok: false, error: 'address and stake are required' })
-  }
-
+// === ИСПРАВЛЕННАЯ АДМИНКА ===
+// Теперь показывает ВСЕ незавершенные битвы, даже если картинки не готовы
+app.get('/api/admin/battles', async (req, res) => {
   try {
     const r = await pool.query(
-      `
-      SELECT id, player1, player2, stake, status
-      FROM battles
-      WHERE stake = $1
-        AND status = 'waiting_judgement'
-        AND winner IS NULL
-        AND (player1 = $2 OR player2 = $2)
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [stakeValue, address]
+      `SELECT * FROM battles WHERE status != 'finished' ORDER BY created_at DESC`
     )
-
-    if (!r.rows.length) {
-      return res.json({ ok: true, status: 'waiting' })
-    }
-
-    const b = r.rows[0]
-    const opponent = b.player1 === address ? b.player2 : b.player1
-
-    return res.json({
-      ok: true,
-      status: 'matched',
-      battleId: b.id,
-      opponent,
-      stake: b.stake,
-    })
-  } catch (err) {
-    console.error('match error', err)
-    return res.status(500).json({ ok: false, error: err.message })
+    console.log(`[ADMIN] Запрошен список битв. Найдено: ${r.rows.length}`)
+    res.json({ ok: true, items: r.rows })
+  } catch (e) {
+    console.error(`[ADMIN ERROR]`, e)
+    res.status(500).json({ ok: false, error: e.message })
   }
 })
 
-// ======================================================
-// 7) Deposits (Arc onchain confirm)
-// ======================================================
-
-// POST /api/battles/:id/confirm-deposit
-// body: { address, txHash }
-// POST /api/battles/:id/confirm-deposit
-// body: { address, txHash }
-// POST /api/battles/:id/confirm-deposit
-// body: { address, txHash }
-app.post('/api/battles/:id/confirm-deposit', async (req, res) => {
-  const user = requireTwitterUser(req, res)
-  if (!user) return
-
-  const battleId = toInt(req.params.id, 0)
-  const address = String(req.body.address || '').trim()
-  const txHash = String(req.body.txHash || '').trim()
-
-  if (!battleId || !address || !txHash) {
-    return res.status(400).json({ ok: false, error: 'battleId, address, txHash are required' })
-  }
-
-  const rpc = (process.env.ARC_RPC_URL || '').trim()
-  const escrowAddr = (process.env.ESCROW_ADDRESS || '').trim()
-  const usdcAddr = (process.env.USDC_ADDRESS || '').trim()
-
-  if (!rpc || !escrowAddr || !usdcAddr) {
-    return res.status(500).json({ ok: false, error: 'ARC_RPC_URL / ESCROW_ADDRESS / USDC_ADDRESS missing' })
-  }
-
-  try {
-    const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [battleId])
-    if (!bRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-    const b = bRes.rows[0]
-
-    const a = address.toLowerCase()
-    if (a !== (b.player1 || '').toLowerCase() && a !== (b.player2 || '').toLowerCase()) {
-      return res.status(403).json({ ok: false, error: 'address is not a player of this battle' })
-    }
-
-    // идемпотентность
-    const already = await pool.query(
-      `SELECT * FROM deposits WHERE battle_id=$1 AND player_address=$2 LIMIT 1`,
-      [battleId, address]
-    )
-    if (already.rows.length) {
-      return res.json({ ok: true, already: true, deposit: already.rows[0] })
-    }
-
-    const provider = new ethers.JsonRpcProvider(rpc)
-
-    const tx = await provider.getTransaction(txHash)
-    if (!tx) return res.status(404).json({ ok: false, error: 'tx not found' })
-
-    const receipt = await provider.getTransactionReceipt(txHash)
-    if (!receipt) return res.status(404).json({ ok: false, error: 'receipt not found' })
-    if (receipt.status !== 1) return res.status(400).json({ ok: false, error: 'tx reverted' })
-
-    if ((tx.from || '').toLowerCase() !== address.toLowerCase()) {
-      return res.status(400).json({ ok: false, error: 'tx.from != address' })
-    }
-    if ((tx.to || '').toLowerCase() !== escrowAddr.toLowerCase()) {
-      return res.status(400).json({ ok: false, error: 'tx.to is not escrow' })
-    }
-
-    // decode call data: deposit(uint256,uint256)
-    const iface = new ethers.Interface(['function deposit(uint256 battleId, uint256 amount)'])
-    let decoded
-    try {
-      decoded = iface.parseTransaction({ data: tx.data })
-    } catch (e) {
-      return res.status(400).json({ ok: false, error: 'tx is not deposit(battleId,amount)' })
-    }
-
-    const callBattleId = Number(decoded.args.battleId)
-    const callAmount = decoded.args.amount
-
-    if (callBattleId !== battleId) {
-      return res.status(400).json({ ok: false, error: 'deposit battleId mismatch' })
-    }
-
-    const usdcDecimals = 6
-    if (!allowedStakeBaseUnits(callAmount.toString(), usdcDecimals)) {
-      return res.status(400).json({ ok: false, error: 'BAD_STAKE base units, allowed 1/5/10 USDC' })
-    }
-
-    // receipt.logs должен содержать Transfer USDC (from -> escrow) на callAmount
-    const erc20Iface = new ethers.Interface([
-      'event Transfer(address indexed from, address indexed to, uint256 value)',
-    ])
-
-    let found = false
-    for (const lg of receipt.logs) {
-      if ((lg.address || '').toLowerCase() !== usdcAddr.toLowerCase()) continue
-      try {
-        const parsed = erc20Iface.parseLog({ topics: lg.topics, data: lg.data })
-        const from = String(parsed.args.from).toLowerCase()
-        const to = String(parsed.args.to).toLowerCase()
-        const value = parsed.args.value
-
-        if (from === address.toLowerCase() && to === escrowAddr.toLowerCase() && value === callAmount) {
-          found = true
-          break
-        }
-      } catch (e) {}
-    }
-
-    if (!found) {
-      return res.status(400).json({ ok: false, error: 'ERC20 Transfer not found in receipt logs' })
-    }
-
-    const net = await provider.getNetwork()
-    const chainId = Number(net.chainId)
-
-    await pool.query(
-      `INSERT INTO deposits (battle_id, player_address, amount, tx_hash, chain_id, status, token_address, escrow_address)
-       VALUES ($1,$2,$3,$4,$5,'confirmed',$6,$7)
-       ON CONFLICT (battle_id, player_address) DO NOTHING`,
-      [battleId, address, callAmount.toString(), txHash, chainId, usdcAddr, escrowAddr]
-    )
-
-    // depCount считаем только confirmed
-    const depCountRes = await pool.query(
-      `SELECT COUNT(*) FROM deposits WHERE battle_id=$1 AND status='confirmed'`,
-      [battleId]
-    )
-    const depCount = Number(depCountRes.rows[0].count || 0)
-
-    let newStatus = b.status
-    if (depCount >= 2) newStatus = 'both_deposited'
-    else newStatus = 'p1_deposited'
-
-    await pool.query(
-      `UPDATE battles SET status=$1, updated_at=NOW() WHERE id=$2`,
-      [newStatus, battleId]
-    )
-
-    // автозапуск генерации после второго депозита
-    if (depCount >= 2) {
-      maybeStartGeneration(pool, battleId).catch((e) => {
-        console.error('maybeStartGeneration failed', e)
-      })
-    }
-
-    await audit('confirm_deposit', battleId, address, { txHash, amount: callAmount.toString(), chainId })
-
-// автозапуск генерации, когда оба депозита подтверждены
-if (depCount >= 2) {
-  setImmediate(() => {
-    maybeStartGeneration(pool, battleId).catch(e => {
-      console.error('maybeStartGeneration failed:', e)
-    })
-  })
-}
-
-
-    return res.json({
-      ok: true,
-      battleId,
-      address,
-      amount: callAmount.toString(),
-      txHash,
-      chainId,
-      status: newStatus,
-    })
-  } catch (err) {
-    console.error('confirm-deposit error', err)
-    return res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-
-// ======================================================
-// 8) Twitter auth routes
-// ======================================================
-
-// ===== TWITTER AUTH ROUTES (returnTo + фикс редиректа) =====
-
-function sanitizeReturnTo(v) {
-  if (!v) return null
-  const s = String(v).trim()
-  if (!s.startsWith('/')) return null
-  if (s.startsWith('//')) return null
-  if (s.includes('://')) return null
-  return s
-}
-
-app.get('/api/auth/twitter', (req, res, next) => {
-  if (!twitterEnabled) {
-    return res.status(503).json({ ok: false, error: 'twitter auth disabled' })
-  }
-
-  // 1) returnTo берём из query: /api/auth/twitter?returnTo=/player.html
-  const returnTo = sanitizeReturnTo(req.query.returnTo)
-  if (returnTo) req.session.returnTo = returnTo
-
-  // 2) гарантируем сохранение сессии ДО редиректа в Twitter
-  req.session.save(() => {
-    passport.authenticate('twitter')(req, res, next)
-  })
-})
-
-function allowedStakeBaseUnits(amountStr, usdcDecimals) {
-  const a = BigInt(amountStr)
-  const ONE = 10n ** BigInt(usdcDecimals)
-  return (a === ONE || a === 5n * ONE || a === 10n * ONE)
-}
-
-async function audit(tag, battleId, address, payload) {
-  try {
-    await pool.query(
-      `INSERT INTO audit_log(tag, battle_id, address, payload) VALUES ($1,$2,$3,$4)`,
-      [tag, battleId || null, address || null, payload ? JSON.stringify(payload) : null]
-    )
-  } catch (e) {}
-}
-
-app.get('/api/battles/:id/state', async (req, res) => {
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok:false, error:'battleId is required' })
-
-  try {
-    const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [battleId])
-    if (!bRes.rows.length) return res.status(404).json({ ok:false, error:'battle not found' })
-    const battle = bRes.rows[0]
-
-    const depRes = await pool.query(
-      `SELECT player_address, amount, tx_hash, status, created_at
-       FROM deposits WHERE battle_id=$1 ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    const workRes = await pool.query(
-      `SELECT player_address, image_url, created_at
-       FROM works WHERE battle_id=$1 ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    const promptRes = await pool.query(
-      `SELECT player_address, prompt, created_at
-       FROM prompts WHERE battle_id=$1 ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    const depositsByAddr = {}
-    for (const d of depRes.rows) depositsByAddr[d.player_address.toLowerCase()] = d
-
-    const worksByAddr = {}
-    for (const w of workRes.rows) worksByAddr[w.player_address.toLowerCase()] = w
-
-    res.json({
-      ok: true,
-      battle,
-      prompts: promptRes.rows,
-      deposits: depRes.rows,
-      works: workRes.rows,
-      computed: {
-        p1Deposited: Boolean(depositsByAddr[(battle.player1||'').toLowerCase()]),
-        p2Deposited: Boolean(depositsByAddr[(battle.player2||'').toLowerCase()]),
-        bothDeposited: depRes.rows.length >= 2,
-        worksCount: workRes.rows.length,
-      }
-    })
-  } catch (err) {
-    console.error('state error', err)
-    res.status(500).json({ ok:false, error: err.message })
-  }
-})
-
-app.post('/api/battles/:id/submit-work', async (req, res) => {
-  const user = requireTwitterUser(req, res)
-  if (!user) return
-
-  const battleId = toInt(req.params.id, 0)
-  const address = String(req.body.address || '').trim()
-  const imageUrl = String(req.body.imageUrl || '').trim()
-
-  if (!battleId || !address || !imageUrl) {
-    return res.status(400).json({ ok:false, error:'battleId, address, imageUrl are required' })
-  }
-
-  try {
-    const bRes = await pool.query(`SELECT * FROM battles WHERE id=$1`, [battleId])
-    if (!bRes.rows.length) return res.status(404).json({ ok:false, error:'battle not found' })
-    const b = bRes.rows[0]
-
-    const a = address.toLowerCase()
-    if (a !== (b.player1||'').toLowerCase() && a !== (b.player2||'').toLowerCase()) {
-      return res.status(403).json({ ok:false, error:'not a player of this battle' })
-    }
-
-    await pool.query(
-      `INSERT INTO works(battle_id, player_address, image_url)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (battle_id, player_address) DO UPDATE SET image_url=EXCLUDED.image_url`,
-      [battleId, address, imageUrl]
-    )
-
-    await audit('submit_work', battleId, address, { imageUrl })
-
-    res.json({ ok:true })
-  } catch (err) {
-    console.error('submit-work error', err)
-    res.status(500).json({ ok:false, error: err.message })
-  }
-})
-
-
-
-app.get('/api/auth/twitter/callback', (req, res, next) => {
-  if (!twitterEnabled) return res.status(503).redirect('/gallery.html?auth=disabled')
-
-  passport.authenticate('twitter', { failureRedirect: '/gallery.html?auth=fail' })(
-    req,
-    res,
-    () => {
-      // если returnTo не задан — по умолчанию возвращаем на player
-      const returnTo = sanitizeReturnTo(req.session.returnTo) || '/player.html'
-      delete req.session.returnTo
-      return res.redirect(returnTo)
-    }
-  )
-})
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.user) return res.json({ ok: true, user: null })
-  res.json({ ok: true, user: req.user })
-})
-
-app.post('/api/auth/logout', (req, res, next) => {
-  req.logout(err => {
-    if (err) return next(err)
-    req.session.destroy(() => {
-      res.clearCookie('connect.sid')
-      res.json({ ok: true })
-    })
-  })
-})
-
-
-app.get('/api/auth/twitter', (req, res, next) => {
-  if (!twitterEnabled) return res.status(503).json({ ok: false, error: 'twitter auth disabled' })
-
-  const returnTo = sanitizeReturnTo(req.query.returnTo)
-  if (returnTo) req.session.returnTo = returnTo
-
-  return passport.authenticate('twitter')(req, res, next)
-})
-
-app.get('/api/auth/twitter/callback', (req, res, next) => {
-  if (!twitterEnabled) return res.status(503).redirect('/gallery.html?auth=disabled')
-
-  passport.authenticate('twitter', { failureRedirect: '/gallery.html?auth=fail' })(req, res, () => {
-    const returnTo = sanitizeReturnTo(req.session.returnTo) || '/gallery.html'
-    delete req.session.returnTo
-    res.redirect(returnTo)
-  })
-})
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.user) return res.json({ ok: true, user: null })
-  res.json({ ok: true, user: req.user })
-})
-
-app.post('/api/auth/logout', (req, res, next) => {
-  req.logout(err => {
-    if (err) return next(err)
-    req.session.destroy(() => {
-      res.clearCookie('connect.sid')
-      res.json({ ok: true })
-    })
-  })
-})
-
-// ======================================================
-// 9) Battles / prompts / featured / votes
-// ======================================================
-
+// === ГАЛЕРЕЯ И ГОЛОСОВАНИЕ ===
 app.get('/api/battles', async (req, res) => {
-  const limit = toInt(req.query.limit || '50', 50)
-  const status = req.query.status || null
-
-  try {
-    let sql = 'SELECT * FROM battles'
-    const params = []
-
-    if (status) {
-      params.push(status)
-      sql += ` WHERE status = $${params.length}`
-    }
-
-    params.push(limit)
-    sql += ` ORDER BY created_at DESC LIMIT $${params.length}`
-
-    const battlesRes = await pool.query(sql, params)
-    res.json({ ok: true, items: battlesRes.rows })
-  } catch (err) {
-    console.error('battles-list error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
+  const r = await pool.query('SELECT * FROM battles WHERE status=\'finished\' ORDER BY score DESC, created_at DESC LIMIT 50')
+  res.json({ok:true, items:r.rows})
 })
 
-app.get('/api/battles/:id/details', async (req, res) => {
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok: false, error: 'battleId is required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-
-    const promptsRes = await pool.query(
-      `SELECT id, player_address, prompt, created_at
-       FROM prompts
-       WHERE battle_id = $1
-       ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    res.json({ ok: true, battle: battleRes.rows[0], prompts: promptsRes.rows })
-  } catch (err) {
-    console.error('battle-details error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-app.get('/api/battles/:id/full', async (req, res) => {
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok: false, error: 'battleId is required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-
-    const promptsRes = await pool.query(
-      `SELECT id, player_address, prompt, created_at
-       FROM prompts
-       WHERE battle_id = $1
-       ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    const nftsRes = await pool.query(
-      `SELECT id, player_address, token_id, token_uri, image_url, created_at
-       FROM nfts
-       WHERE battle_id = $1
-       ORDER BY created_at ASC`,
-      [battleId]
-    )
-
-    res.json({ ok: true, battle: battleRes.rows[0], prompts: promptsRes.rows, nfts: nftsRes.rows })
-  } catch (err) {
-    console.error('battle-full error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// Optional helper lookup
-app.get('/api/battles/lookup', async (req, res) => {
-  const address = String(req.query.address || '').trim()
-  const stake = Number(req.query.stake || 1) || 1
-  const after = String(req.query.after || '').trim()
-
-  if (!address || !after) return res.status(400).json({ ok: false, error: 'address and after are required' })
-
-  try {
-    const q = await pool.query(
-      `SELECT *
-       FROM battles
-       WHERE stake = $1
-         AND created_at >= $2::timestamptz
-         AND (player1 = $3 OR player2 = $3)
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [stake, after, address]
-    )
-
-    if (!q.rows.length) return res.json({ ok: true, found: false })
-
-    return res.json({ ok: true, found: true, battle: q.rows[0], battleId: q.rows[0].id })
-  } catch (err) {
-    console.error('lookup error', err)
-    return res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// ======================================================
-// 10) Featured / votes
-// ======================================================
-
-app.get('/api/featured/top', async (req, res) => {
-  const limit = toInt(req.query.limit || '20', 20)
-
-  try {
-    const listRes = await pool.query(
-      `SELECT
-         fw.*,
-         b.player1,
-         b.player2,
-         p.prompt,
-         n.image_url
-       FROM featured_works fw
-       LEFT JOIN battles b ON b.id = fw.battle_id
-       LEFT JOIN prompts p ON p.id = fw.prompt_id
-       LEFT JOIN nfts n ON n.id = fw.nft_id
-       ORDER BY fw.total_votes DESC, fw.created_at DESC
-       LIMIT $1`,
-      [limit]
-    )
-
-    res.json({ ok: true, items: listRes.rows })
-  } catch (err) {
-    console.error('featured-top error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-app.post('/api/featured/:id/vote', async (req, res) => {
-  const featuredId = toInt(req.params.id, 0)
-  if (!featuredId) return res.status(400).json({ ok: false, error: 'featuredId is required' })
-
-  const user = requireTwitterUser(req, res)
-  if (!user) return
-
-  try {
-    const fwRes = await pool.query('SELECT * FROM featured_works WHERE id = $1', [featuredId])
-    if (!fwRes.rows.length) return res.status(404).json({ ok: false, error: 'featured work not found' })
-
-    let alreadyVoted = false
+app.post('/api/battles/:id/vote', async (req, res) => {
+    const { address, val } = req.body
+    const battleId = Number(req.params.id)
+    console.log(`[Vote] Голос за битву ${battleId} от ${address}: ${val}`)
+    const client = await pool.connect()
     try {
-      await pool.query(
-        `INSERT INTO votes (featured_work_id, voter_user_id)
-         VALUES ($1, $2)`,
-        [featuredId, user.id]
-      )
-    } catch (err) {
-      if (err.code === '23505') alreadyVoted = true
-      else throw err
-    }
-
-    const countRes = await pool.query('SELECT COUNT(*) FROM votes WHERE featured_work_id = $1', [featuredId])
-    const totalVotes = Number(countRes.rows[0].count)
-
-    await pool.query('UPDATE featured_works SET total_votes = $1 WHERE id = $2', [totalVotes, featuredId])
-
-    res.json({ ok: true, featuredId, totalVotes, alreadyVoted })
-  } catch (err) {
-    console.error('vote error', err)
-    res.status(500).json({ ok: false, error: 'internal error' })
-  }
+        await client.query('BEGIN')
+        await client.query(`INSERT INTO battle_votes (battle_id, voter_address, val) VALUES ($1, $2, $3) ON CONFLICT (battle_id, voter_address) DO UPDATE SET val=$3`, [battleId, address, val])
+        await client.query(`UPDATE battles SET score = score + $1 WHERE id=$2`, [val, battleId])
+        await client.query('COMMIT')
+        res.json({ ok: true, newScore: 0 }) 
+    } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ok:false}) } finally { client.release() }
 })
 
-// ======================================================
-// 11) Admin routes (winner / promote / generate)
-// ======================================================
-
-async function generateImageStub(prompt, playerAddress) {
-  const label = encodeURIComponent('AI Art')
-  return `https://dummyimage.com/1024x1024/222/fff.png&text=${label}`
-}
-
-app.post('/api/battles/:id/set-winner', async (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  const battleId = toInt(req.params.id, 0)
-  const { winner } = req.body
-
-  if (!battleId || !winner) return res.status(400).json({ ok: false, error: 'battleId and winner are required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-
-    const battle = battleRes.rows[0]
-    if (battle.player1 !== winner && battle.player2 !== winner) {
-      return res.status(403).json({ ok: false, error: 'winner must be one of the players' })
-    }
-
-    const updated = await pool.query(
-      `UPDATE battles
-       SET winner = $1,
-           status = 'finished',
-           updated_at = NOW()
-       WHERE id = $2
-       RETURNING *`,
-      [winner, battleId]
-    )
-
-    res.json({ ok: true, battle: updated.rows[0] })
-  } catch (err) {
-    console.error('set-winner error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-app.post('/api/battles/:id/promote-winner', async (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok: false, error: 'battleId is required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-
-    const battle = battleRes.rows[0]
-    if (!battle.winner) return res.status(400).json({ ok: false, error: 'battle has no winner yet' })
-
-    const existingRes = await pool.query(
-      'SELECT * FROM featured_works WHERE battle_id = $1 AND player_address = $2',
-      [battleId, battle.winner]
-    )
-    if (existingRes.rows.length > 0) return res.json({ ok: true, featured: existingRes.rows[0], alreadyExists: true })
-
-    const promptRes = await pool.query(
-      `SELECT id
-       FROM prompts
-       WHERE battle_id = $1 AND player_address = $2
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [battleId, battle.winner]
-    )
-    const promptId = promptRes.rows.length ? promptRes.rows[0].id : null
-
-    const insertRes = await pool.query(
-      `INSERT INTO featured_works (battle_id, player_address, prompt_id, nft_id, total_votes)
-       VALUES ($1, $2, $3, NULL, 0)
-       RETURNING *`,
-      [battleId, battle.winner, promptId]
-    )
-
-    res.json({ ok: true, featured: insertRes.rows[0], alreadyExists: false })
-  } catch (err) {
-    console.error('promote-winner error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-app.get('/api/battles/:id/generate-debug', async (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  const battleId = toInt(req.params.id, 0)
-  if (!battleId) return res.status(400).json({ ok: false, error: 'battleId is required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-
-    const playersRes = await pool.query(
-      `SELECT DISTINCT player_address
-       FROM prompts
-       WHERE battle_id = $1`,
-      [battleId]
-    )
-
-    if (!playersRes.rows.length) return res.status(400).json({ ok: false, error: 'no prompts for this battle yet' })
-
-    const createdNfts = []
-
-    for (const row of playersRes.rows) {
-      const addr = row.player_address
-
-      const existingRes = await pool.query(
-        `SELECT id
-         FROM nfts
-         WHERE battle_id = $1 AND player_address = $2
-         LIMIT 1`,
-        [battleId, addr]
-      )
-      if (existingRes.rows.length > 0) continue
-
-      const promptRes = await pool.query(
-        `SELECT prompt
-         FROM prompts
-         WHERE battle_id = $1 AND player_address = $2
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [battleId, addr]
-      )
-      if (!promptRes.rows.length) continue
-
-      const prompt = promptRes.rows[0].prompt
-      const imageUrl = await generateImageStub(prompt, addr)
-
-      const insertRes = await pool.query(
-        `INSERT INTO nfts (battle_id, player_address, token_id, token_uri, image_url)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [battleId, addr, null, null, imageUrl]
-      )
-
-      const nft = insertRes.rows[0]
-      createdNfts.push(nft)
-
-      await pool.query(
-        `UPDATE featured_works
-         SET nft_id = $1
-         WHERE battle_id = $2 AND player_address = $3`,
-        [nft.id, battleId, addr]
-      )
-    }
-
-    res.json({ ok: true, count: createdNfts.length, nfts: createdNfts })
-  } catch (err) {
-    console.error('generate-debug error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// Convenience: close battle = set winner + promote + generate + attach winner nft
-app.post('/api/battles/:id/close', async (req, res) => {
-  if (!requireAdmin(req, res)) return
-
-  const battleId = toInt(req.params.id, 0)
-  const { winner } = req.body
-
-  if (!battleId || !winner) return res.status(400).json({ ok: false, error: 'battleId and winner are required' })
-
-  try {
-    const battleRes = await pool.query('SELECT * FROM battles WHERE id = $1', [battleId])
-    if (!battleRes.rows.length) return res.status(404).json({ ok: false, error: 'battle not found' })
-    const battle = battleRes.rows[0]
-
-    if (battle.player1 !== winner && battle.player2 !== winner) {
-      return res.status(403).json({ ok: false, error: 'winner must be one of the players' })
-    }
-
-    const updatedBattleRes = await pool.query(
-      `UPDATE battles
-       SET winner = $1,
-           status = 'finished',
-           updated_at = NOW()
-       WHERE id = $2
-       RETURNING *`,
-      [winner, battleId]
-    )
-    const updatedBattle = updatedBattleRes.rows[0]
-
-    let featured = null
-    const existingFeaturedRes = await pool.query(
-      'SELECT * FROM featured_works WHERE battle_id = $1 AND player_address = $2',
-      [battleId, winner]
-    )
-
-    if (existingFeaturedRes.rows.length > 0) {
-      featured = existingFeaturedRes.rows[0]
-    } else {
-      const promptRes = await pool.query(
-        `SELECT id
-         FROM prompts
-         WHERE battle_id = $1 AND player_address = $2
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [battleId, winner]
-      )
-      const promptId = promptRes.rows.length ? promptRes.rows[0].id : null
-
-      const ins = await pool.query(
-        `INSERT INTO featured_works (battle_id, player_address, prompt_id, nft_id, total_votes)
-         VALUES ($1, $2, $3, NULL, 0)
-         RETURNING *`,
-        [battleId, winner, promptId]
-      )
-      featured = ins.rows[0]
-    }
-
-    const playersRes = await pool.query(
-      `SELECT DISTINCT player_address
-       FROM prompts
-       WHERE battle_id = $1`,
-      [battleId]
-    )
-
-    let createdCount = 0
-    let winnerNftId = null
-
-    for (const row of playersRes.rows) {
-      const addr = row.player_address
-
-      const existingNftRes = await pool.query(
-        `SELECT id
-         FROM nfts
-         WHERE battle_id = $1 AND player_address = $2
-         LIMIT 1`,
-        [battleId, addr]
-      )
-
-      if (existingNftRes.rows.length > 0) {
-        if (addr === winner) winnerNftId = existingNftRes.rows[0].id
-        continue
-      }
-
-      const promptTextRes = await pool.query(
-        `SELECT prompt
-         FROM prompts
-         WHERE battle_id = $1 AND player_address = $2
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [battleId, addr]
-      )
-      if (!promptTextRes.rows.length) continue
-
-      const imageUrl = await generateImageStub(promptTextRes.rows[0].prompt, addr)
-      const insertNftRes = await pool.query(
-        `INSERT INTO nfts (battle_id, player_address, token_id, token_uri, image_url)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [battleId, addr, null, null, imageUrl]
-      )
-
-      createdCount += 1
-      if (addr === winner) winnerNftId = insertNftRes.rows[0].id
-    }
-
-    if (winnerNftId && featured && !featured.nft_id) {
-      const updFeaturedRes = await pool.query(
-        `UPDATE featured_works SET nft_id = $1 WHERE id = $2 RETURNING *`,
-        [winnerNftId, featured.id]
-      )
-      featured = updFeaturedRes.rows[0]
-    }
-
-    res.json({ ok: true, battle: updatedBattle, featured, createdNfts: createdCount })
-  } catch (err) {
-    console.error('close battle error', err)
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// ======================================================
-// 12) Error handler + start
-// ======================================================
-
-app.use((err, req, res, next) => {
-  console.error('UNHANDLED ERROR:', err)
-  res.status(500).json({
-    ok: false,
-    error: 'internal_error',
-    details: err?.oauthError?.data || err.message,
-  })
-})
-
-const PORT = process.env.PORT || 4000
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`)
-  console.log(`Twitter enabled: ${twitterEnabled ? 'YES' : 'NO'}`)
-  console.log(`Admin enabled: ${ADMIN_TOKEN ? 'YES' : 'NO'}`)
-})
+app.listen(process.env.PORT || 4000, () => console.log('✅ Server started (ADMIN FULL ACCESS)'))
