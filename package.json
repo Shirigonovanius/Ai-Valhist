@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "css:watch": ".\\tailwindcss.exe -i ./src/input.css -o ./public/styles.css --watch"
   },
