@@ -4,13 +4,23 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "css:watch": ".\\tailwindcss.exe -i ./src/input.css -o ./public/styles.css --watch"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
+    "@gradio/client": "^2.0.4",
+    "@huggingface/inference": "^4.13.11",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@supabase/supabase-js": "^2.94.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -18,9 +28,29 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
     "express-session": "^1.18.2",
+    "framer-motion": "^12.31.0",
+    "lucide-react": "^0.344.0",
     "openai": "^6.15.0",
     "passport": "^0.7.0",
     "passport-twitter": "^1.0.4",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "postcss": "^8.4.35",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^3.4.17",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.3.3",
+    "vite": "^5.1.5"
   }
 }

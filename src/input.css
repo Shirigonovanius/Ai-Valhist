@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/*
+  Определяем нашу тему Dark Fantasy.
+  Эти цвета станут доступны как классы, например:
+  --color-fantasy-dark -> bg-fantasy-dark, text-fantasy-dark
+*/
+@theme {
+  --color-fantasy-dark: #0a0a0a;     /* Глубокий черный фон */
+  --color-fantasy-stone: #1c1c1c;    /* Цвет камня для блоков */
+  --color-fantasy-gold: #d4af37;     /* Золото для заголовков */
+  --color-fantasy-moss: #4a5d23;     /* Зеленый мох для границ */
+  --color-fantasy-text: #e0e0e0;     /* Светлый текст */
+  --color-fantasy-muted: #a0a0a0;    /* Приглушенный текст */
+  --color-fantasy-magic: #4f46e5;    /* Фиолетовая магия */
+
+  /* Фоновое изображение */
+  --background-image-arena-bg: url('/images/background.jpg');
+}
+
+/*
+  Базовые стили для скроллбара, чтобы он был темным
+*/
+@layer base {
+    html {
+        scrollbar-width: thin;
+        scrollbar-color: var(--color-fantasy-moss) var(--color-fantasy-dark);
+    }
+    body::-webkit-scrollbar {
+        width: 12px;
+    }
+    body::-webkit-scrollbar-track {
+        background: var(--color-fantasy-dark);
+    }
+    body::-webkit-scrollbar-thumb {
+        background-color: var(--color-fantasy-moss);
+        border-radius: 20px;
+        border: 3px solid var(--color-fantasy-dark);
+    }
+}
