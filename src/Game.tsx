@@ -26,6 +26,20 @@ const ESCROW_ABI = [
   "function battleCounter() view returns (uint256)"
 ];
 
+// --- НАСТРОЙКИ СЕТИ ARC TESTNET ---
+const TARGET_CHAIN_ID = "0x4cef52"; // 5042002 в HEX
+const TARGET_NETWORK_PARAMS = {
+  chainId: TARGET_CHAIN_ID,
+  chainName: 'Arc Testnet',
+  nativeCurrency: { 
+    name: 'USDC', 
+    symbol: 'USDC', 
+    decimals: 18 
+  },
+  rpcUrls: ['https://rpc.testnet.arc.network'],
+  blockExplorerUrls: ['https://testnet.arcscan.app/']
+};
+
 declare global { interface Window { ethereum?: any; } }
 
 export function Game() {
@@ -41,13 +55,40 @@ export function Game() {
   const [battleResult, setBattleResult] = useState<any>(null);
   const [cooldownMessage, setCooldownMessage] = useState(""); 
 
+  // --- ФУНКЦИЯ ПРОВЕРКИ И ПЕРЕКЛЮЧЕНИЯ СЕТИ ---
+  const checkAndSwitchNetwork = async () => {
+    if (!window.ethereum) return;
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: TARGET_CHAIN_ID }],
+      });
+    } catch (switchError: any) {
+      if (switchError.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [TARGET_NETWORK_PARAMS],
+          });
+        } catch (addError) {
+          console.error("Failed to add network:", addError);
+        }
+      } else {
+        console.error("Failed to switch network:", switchError);
+      }
+    }
+  };
+
   useEffect(() => {
     const checkWallet = async () => {
         if (window.ethereum) {
             try {
                 const provider = new BrowserProvider(window.ethereum);
                 const accounts = await provider.send("eth_accounts", []);
-                if (accounts.length > 0) setAccount(accounts[0]);
+                if (accounts.length > 0) {
+                    setAccount(accounts[0]);
+                    await checkAndSwitchNetwork(); // Проверяем сеть при авто-подключении
+                }
             } catch (e) { console.error("Auto-connect failed", e); }
         }
     };
@@ -115,6 +156,7 @@ export function Game() {
         const provider = new BrowserProvider(window.ethereum);
         const accounts = await provider.send("eth_requestAccounts", []);
         setAccount(accounts[0]);
+        await checkAndSwitchNetwork(); // Проверяем сеть при ручном подключении
       } catch (error) { console.error(error); }
     } else { alert("Please install MetaMask!"); }
   };
@@ -136,7 +178,7 @@ export function Game() {
     return () => { supabase.removeChannel(subscription); clearInterval(interval); }
   }, [activeBattleId]);
 
-const handleStatusUpdate = async (battle: any) => {
+  const handleStatusUpdate = async (battle: any) => {
       // 🔥 ГЛАВНЫЙ ФИКС: Принудительно синхронизируем тему из базы для обоих игроков!
       if (battle.theme) {
           setBattleTheme(battle.theme);
