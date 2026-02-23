@@ -136,7 +136,12 @@ export function Game() {
     return () => { supabase.removeChannel(subscription); clearInterval(interval); }
   }, [activeBattleId]);
 
-  const handleStatusUpdate = async (battle: any) => {
+const handleStatusUpdate = async (battle: any) => {
+      // 🔥 ГЛАВНЫЙ ФИКС: Принудительно синхронизируем тему из базы для обоих игроков!
+      if (battle.theme) {
+          setBattleTheme(battle.theme);
+      }
+
       if (battle.status === 'ready_for_generation') setOpponentStatus("Opponent joined!");
       
       if (battle.status === 'waiting_player_2' || battle.status === 'ready_for_generation') {
